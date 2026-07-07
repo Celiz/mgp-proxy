@@ -13,6 +13,7 @@ import {
     recordRequest,
     snapshot,
 } from "./stats.js";
+import { dashboardHtml } from "./dashboard.js";
 
 // ── Global error handlers: el proceso NUNCA debe morir ──────────────────
 process.on("uncaughtException", (err) => {
@@ -53,6 +54,8 @@ app.use(secureHeaders());
 app.use(async (c, next) => {
     const start = performance.now();
     await next();
+    // No registrar requests internos del dashboard
+    if (c.req.path.startsWith("/stats")) return;
     const durationMs = Math.round(performance.now() - start);
     recordRequest({
         at: Date.now(),
@@ -216,7 +219,11 @@ app.get("/mgp/:accion", async (c) => {
     }
 });
 
-// 5. Minimal Stats Route
+// 5. Stats Dashboard + API
+app.get("/stats", (c) => {
+    return c.html(dashboardHtml);
+});
+
 app.get("/stats/data", (c) => {
     return c.json({ ...snapshot(), queue: getMgpQueueStats() });
 });
