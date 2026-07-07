@@ -14,6 +14,14 @@ import {
     snapshot,
 } from "./stats.js";
 
+// ── Global error handlers: el proceso NUNCA debe morir ──────────────────
+process.on("uncaughtException", (err) => {
+    console.error("[bondi-proxy] ⚠️  uncaughtException (proceso sigue vivo):", err);
+});
+process.on("unhandledRejection", (reason) => {
+    console.error("[bondi-proxy] ⚠️  unhandledRejection (proceso sigue vivo):", reason);
+});
+
 // 1. Minimal environment for proxy-only mode (No DB required)
 const envSchema = z.object({
     PORT: z.coerce.number().int().positive().default(4000),
