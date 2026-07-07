@@ -18,6 +18,8 @@ const envSchema = z.object({
     PORT: z.coerce.number().int().positive().default(4000),
     HOST: z.string().default("0.0.0.0"),
     MGP_PROXY_URL: z.string().url().optional(),
+    MGP_RSA_PUBKEY: z.string().min(1, "Falta la llave pública de MGP"),
+    MGP_SHARED_KEY: z.string().min(1, "Falta la llave compartida de MGP"),
     ALLOWED_ORIGINS: z
         .string()
         .optional()
