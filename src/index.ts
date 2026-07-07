@@ -4,7 +4,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
-import { enqueueMgp, getMgpQueueStats, setProxyUrl } from "./lib/mgpQueue.js";
+import { enqueueMgp, getMgpQueueStats } from "./lib/mgpQueue.js";
 import {
     recordAccion,
     recordCache,
@@ -17,7 +17,6 @@ import {
 const envSchema = z.object({
     PORT: z.coerce.number().int().positive().default(4000),
     HOST: z.string().default("0.0.0.0"),
-    MGP_PROXY_URL: z.string().url().optional(),
     MGP_RSA_PUBKEY: z.string().min(1, "Falta la llave pública de MGP"),
     MGP_SHARED_KEY: z.string().min(1, "Falta la llave compartida de MGP"),
     ALLOWED_ORIGINS: z
@@ -35,9 +34,6 @@ if (!envParsed.success) {
     process.exit(1);
 }
 const env = envParsed.data;
-
-// Initialize proxy URL for the queue
-setProxyUrl(env.MGP_PROXY_URL);
 
 // 2. Setup Hono App
 const app = new Hono();
