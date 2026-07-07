@@ -9,23 +9,23 @@ importers:
   .:
     dependencies:
       '@hono/node-server':
-        specifier: ^2.0.8
+        specifier: 2.0.8
         version: 2.0.8(hono@4.12.28)
       hono:
-        specifier: ^4.12.28
+        specifier: 4.12.28
         version: 4.12.28
       zod:
-        specifier: ^4.4.3
+        specifier: 4.4.3
         version: 4.4.3
     devDependencies:
       '@types/node':
-        specifier: ^26.1.0
+        specifier: 26.1.0
         version: 26.1.0
       tsx:
-        specifier: ^4.23.0
+        specifier: 4.23.0
         version: 4.23.0
       typescript:
-        specifier: ^6.0.3
+        specifier: 6.0.3
         version: 6.0.3
 
 packages:

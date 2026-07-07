@@ -1,4 +1,4 @@
-
+import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
@@ -215,8 +215,5 @@ app.get("/stats/data", (c) => {
 });
 
 // 6. Start Server
-console.log(`[bondi-proxy] Iniciando en puerto ${env.PORT} con Bun 🥟`);
-export default {
-    port: env.PORT,
-    fetch: app.fetch,
-};
+console.log(`[bondi-proxy] Iniciando en puerto ${env.PORT} con Node.js 🚀`);
+serve({ fetch: app.fetch, port: env.PORT, hostname: env.HOST });
