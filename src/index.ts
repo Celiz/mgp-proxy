@@ -151,9 +151,9 @@ app.post("/", async (c) => {
     const accion = bodyParams.get("accion") ?? "(desconocida)";
     const { fresh: freshTtl, stale: staleTtl } = getTtls(accion);
     recordAccion(accion);
-    const parada = bodyParams.get("CodigoParada") ?? bodyParams.get("codigoParada") ?? bodyParams.get("parada");
+    const parada = bodyParams.get("CodigoParada") ?? bodyParams.get("codigoParada") ?? bodyParams.get("parada") ?? bodyParams.get("identificadorParada");
     if (parada) recordParada(parada);
-    const linea = bodyParams.get("CodigoLineaParada") ?? bodyParams.get("CodigoLinea") ?? bodyParams.get("Linea") ?? bodyParams.get("linea");
+    const linea = bodyParams.get("CodigoLineaParada") ?? bodyParams.get("codigoLineaParada") ?? bodyParams.get("CodigoLinea") ?? bodyParams.get("Linea") ?? bodyParams.get("linea");
     trackQuery(accion, parada, linea);
 
     if (cached && now - cached.at < freshTtl) {
@@ -196,9 +196,9 @@ app.get("/mgp/:accion", async (c) => {
     const sMaxAge = isSemiStatic ? 21_600 : 30;
     const browserMaxAge = isSemiStatic ? 3_600 : 15;
     recordAccion(accion);
-    const parada = params["CodigoParada"] ?? params["codigoParada"] ?? params["parada"];
+    const parada = params["CodigoParada"] ?? params["codigoParada"] ?? params["parada"] ?? params["identificadorParada"];
     if (parada) recordParada(parada);
-    const linea = params["CodigoLineaParada"] ?? params["CodigoLinea"] ?? params["Linea"] ?? params["linea"];
+    const linea = params["CodigoLineaParada"] ?? params["codigoLineaParada"] ?? params["CodigoLinea"] ?? params["Linea"] ?? params["linea"];
     trackQuery(accion, parada, linea);
 
     c.header("Access-Control-Allow-Origin", "*");
