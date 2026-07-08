@@ -17,6 +17,14 @@ import {
 } from "./stats.js";
 import { dashboardHtml } from "./dashboard.js";
 import { analyticsDashboardHtml } from "./analyticsDashboard.js";
+import fs from "fs";
+import path from "path";
+
+const lineasData = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "src/data/static/lineas.json"), "utf8"));
+const lineaMap = new Map<string, string>();
+for (const l of lineasData) {
+    lineaMap.set(l.CodigoLineaParada, l.Descripcion);
+}
 
 // ── Global error handlers: el proceso NUNCA debe morir ──────────────────
 process.on("uncaughtException", (err) => {
@@ -153,7 +161,8 @@ app.post("/", async (c) => {
     recordAccion(accion);
     const parada = bodyParams.get("CodigoParada") ?? bodyParams.get("codigoParada") ?? bodyParams.get("parada") ?? bodyParams.get("identificadorParada");
     if (parada) recordParada(parada);
-    const linea = bodyParams.get("CodigoLineaParada") ?? bodyParams.get("codigoLineaParada") ?? bodyParams.get("CodigoLinea") ?? bodyParams.get("Linea") ?? bodyParams.get("linea");
+    let linea = bodyParams.get("CodigoLineaParada") ?? bodyParams.get("codigoLineaParada") ?? bodyParams.get("CodigoLinea") ?? bodyParams.get("Linea") ?? bodyParams.get("linea");
+    if (linea && lineaMap.has(linea)) linea = lineaMap.get(linea) as string;
     trackQuery(accion, parada, linea);
 
     if (cached && now - cached.at < freshTtl) {
@@ -198,7 +207,8 @@ app.get("/mgp/:accion", async (c) => {
     recordAccion(accion);
     const parada = params["CodigoParada"] ?? params["codigoParada"] ?? params["parada"] ?? params["identificadorParada"];
     if (parada) recordParada(parada);
-    const linea = params["CodigoLineaParada"] ?? params["codigoLineaParada"] ?? params["CodigoLinea"] ?? params["Linea"] ?? params["linea"];
+    let linea = params["CodigoLineaParada"] ?? params["codigoLineaParada"] ?? params["CodigoLinea"] ?? params["Linea"] ?? params["linea"];
+    if (linea && lineaMap.has(linea)) linea = lineaMap.get(linea) as string;
     trackQuery(accion, parada, linea);
 
     c.header("Access-Control-Allow-Origin", "*");
