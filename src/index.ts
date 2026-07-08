@@ -6,14 +6,17 @@ import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import { enqueueMgp, getMgpQueueStats } from "./lib/mgpQueue.js";
+import { trackQuery } from "./lib/analytics.js";
 import {
     recordAccion,
     recordCache,
     recordError,
+    recordParada,
     recordRequest,
     snapshot,
 } from "./stats.js";
 import { dashboardHtml } from "./dashboard.js";
+import { analyticsDashboardHtml } from "./analyticsDashboard.js";
 
 // ── Global error handlers: el proceso NUNCA debe morir ──────────────────
 process.on("uncaughtException", (err) => {
@@ -144,9 +147,14 @@ app.post("/", async (c) => {
     const key = normalizeKey(body);
     const now = Date.now();
     const cached = proxyCache.get(key);
-    const accion = new URLSearchParams(body).get("accion") ?? "(desconocida)";
+    const bodyParams = new URLSearchParams(body);
+    const accion = bodyParams.get("accion") ?? "(desconocida)";
     const { fresh: freshTtl, stale: staleTtl } = getTtls(accion);
     recordAccion(accion);
+    const parada = bodyParams.get("CodigoParada") ?? bodyParams.get("codigoParada") ?? bodyParams.get("parada");
+    if (parada) recordParada(parada);
+    const linea = bodyParams.get("CodigoLineaParada") ?? bodyParams.get("CodigoLinea") ?? bodyParams.get("Linea") ?? bodyParams.get("linea");
+    trackQuery(accion, parada, linea);
 
     if (cached && now - cached.at < freshTtl) {
         recordCache("HIT");
@@ -188,6 +196,10 @@ app.get("/mgp/:accion", async (c) => {
     const sMaxAge = isSemiStatic ? 21_600 : 30;
     const browserMaxAge = isSemiStatic ? 3_600 : 15;
     recordAccion(accion);
+    const parada = params["CodigoParada"] ?? params["codigoParada"] ?? params["parada"];
+    if (parada) recordParada(parada);
+    const linea = params["CodigoLineaParada"] ?? params["CodigoLinea"] ?? params["Linea"] ?? params["linea"];
+    trackQuery(accion, parada, linea);
 
     c.header("Access-Control-Allow-Origin", "*");
 
@@ -226,6 +238,18 @@ app.get("/stats", (c) => {
 
 app.get("/stats/data", (c) => {
     return c.json({ ...snapshot(), queue: getMgpQueueStats() });
+});
+
+// 5b. Analytics Dashboard (persistent data)
+app.get("/stats/analytics", (c) => {
+    return c.html(analyticsDashboardHtml);
+});
+
+app.get("/stats/analytics/data", async (c) => {
+    const days = Number(c.req.query("days") ?? "0");
+    const { getAnalyticsSnapshot } = await import("./lib/analytics.js");
+    const data = await getAnalyticsSnapshot(days);
+    return c.json(data);
 });
 
 // 6. Start Server

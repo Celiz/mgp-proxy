@@ -42,6 +42,7 @@ const counts = {
     byStatus: new Map<number, number>(),
     byPath: new Map<string, number>(),
     byAccion: new Map<string, number>(),
+    byParada: new Map<string, number>(),
     cacheHit: 0,
     cacheMiss: 0,
     cacheStale: 0,
@@ -81,6 +82,10 @@ export function recordError(path: string, status: number, message: string): void
 
 export function recordAccion(accion: string): void {
     bump(counts.byAccion, accion);
+}
+
+export function recordParada(codigo: string): void {
+    bump(counts.byParada, codigo);
 }
 
 export function recordCache(state: "HIT" | "MISS" | "STALE"): void {
@@ -139,6 +144,7 @@ export function snapshot() {
             byStatus: Object.fromEntries(counts.byStatus),
             topPaths: topN(counts.byPath),
             topAcciones: topN(counts.byAccion),
+            topParadas: topN(counts.byParada, 20),
             last1m: bucketRequests(60_000),
             last5m: bucketRequests(5 * 60_000),
             last15m: bucketRequests(15 * 60_000),

@@ -418,6 +418,8 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
       <h1>Bondi Proxy <span>— dashboard</span></h1>
     </div>
     <div class="header-meta">
+      <a href="/stats/analytics" style="color:var(--accent);text-decoration:none;font-weight:600;font-size:13px;opacity:0.85;transition:opacity 0.2s" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.85'">📊 Analytics</a>
+      <span>·</span>
       <div class="live-dot"></div>
       <span id="uptime">—</span>
       <span>·</span>
@@ -480,6 +482,12 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
       <div class="card-title"><span class="icon">🛤️</span> Top paths</div>
       <div class="bar-chart" id="top-paths"></div>
     </div>
+  </div>
+
+  <!-- Row 3b: Top paradas -->
+  <div class="card" style="margin-bottom:24px">
+    <div class="card-title"><span class="icon">📍</span> Top paradas consultadas</div>
+    <div class="bar-chart" id="top-paradas"></div>
   </div>
 
   <!-- Row 4: Errors -->
@@ -669,6 +677,7 @@ async function refresh() {
     // Bar charts
     renderBars('top-acciones', d.requests.topAcciones);
     renderBars('top-paths', d.requests.topPaths);
+    renderBars('top-paradas', d.requests.topParadas);
 
     // Errors
     renderErrors(d.errors);
