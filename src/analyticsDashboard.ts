@@ -425,6 +425,40 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
     </div>
     <div class="header-controls">
       <a href="/stats" class="back-link">← Dashboard principal</a>
+      
+      <select id="linea-filter" class="pill" style="background:var(--card-bg); color:var(--text); border:1px solid var(--border); outline:none; height: 32px;">
+        <option value="">Todas las líneas</option>
+        <option value="501">501</option>
+        <option value="511">511</option>
+        <option value="512">512</option>
+        <option value="521">521</option>
+        <option value="522">522</option>
+        <option value="523">523</option>
+        <option value="525">525</option>
+        <option value="531">531</option>
+        <option value="532">532</option>
+        <option value="533">533</option>
+        <option value="541">541</option>
+        <option value="542">542</option>
+        <option value="543">543</option>
+        <option value="551">551</option>
+        <option value="552">552</option>
+        <option value="553">553</option>
+        <option value="554">554</option>
+        <option value="555">555</option>
+        <option value="562">562</option>
+        <option value="563">563</option>
+        <option value="571">571</option>
+        <option value="573">573</option>
+        <option value="581">581</option>
+        <option value="591">591</option>
+        <option value="593">593</option>
+        <option value="593C">593C</option>
+        <option value="717">717</option>
+        <option value="BATAN">BATAN</option>
+        <option value="221 COSTA AZUL">221 COSTA AZUL</option>
+      </select>
+
       <div class="filter-pills">
         <button class="pill" data-days="1">24 horas</button>
         <button class="pill" data-days="7">7 días</button>
@@ -521,6 +555,7 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
 <script>
 // ── State ──────────────────────────────────────────────────
 let currentDays = 30;
+let currentLinea = "";
 let map = null;
 let markersLayer = null;
 
@@ -569,12 +604,19 @@ function updateMap(paradaGeo) {
         '</div>'
       : '<div style="margin-top:6px; padding-top:6px; border-top: 1px solid #e5e5e5; font-size:11px; color:#9ca3af;">Sin desglose de líneas</div>';
 
+    const ramalesText = p.ramales && p.ramales.length > 0 
+      ? '<div style="margin-top:6px; padding-top:6px; border-top: 1px dashed #e5e5e5; font-size:11px; color:#4b5563;">' +
+        '<strong>Ramales:</strong> ' + p.ramales.join(', ') + 
+        '</div>'
+      : '';
+
     marker.bindPopup(
       '<div style="font-family:Inter,sans-serif;font-size:12px;line-height:1.4;color:#111;min-width:180px;">' +
         '<div style="font-size:14px; font-weight:700; margin-bottom: 2px;">' + (p.nombre || 'Parada ' + p.codigo) + '</div>' +
         '<div style="color:#6b7280; font-size:11px; margin-bottom: 4px;">Código: ' + p.codigo + '</div>' +
         '<div style="font-size:13px; margin-bottom: 4px;"><strong style="color:#3b82f6; font-size:15px;">' + p.count.toLocaleString() + '</strong> consultas totales</div>' +
         lineasText +
+        ramalesText +
       '</div>'
     );
 
@@ -729,13 +771,17 @@ function renderLineas(items) {
   items.slice(0, 15).forEach((item, idx) => {
     const pct = mx > 0 ? (item.count / mx) * 100 : 0;
     const code = item.key;
-    const route = item.nombre || (code + ' Route');
+    const route = item.nombre || code;
+    const subtitle = item.ramales && item.ramales.length > 0 
+      ? item.ramales.map(r => r.ramal + ' (' + r.count + ')').join(' • ') 
+      : 'Consultas generales';
     
     html += '<div class="list-item">';
     html += '  <div class="list-rank">' + (idx + 1) + '</div>';
     html += '  <div class="linea-badge">' + code + '</div>';
     html += '  <div class="list-info">';
-    html += '    <div class="list-name" title="' + route + '">' + route + '</div>';
+    html += '    <div class="list-name" title="Línea ' + route + '">Línea ' + route + '</div>';
+    html += '    <div class="list-sub">' + subtitle + '</div>';
     html += '    <div class="list-progress-bg"><div class="list-progress-fill blue" style="width:' + pct + '%"></div></div>';
     html += '  </div>';
     html += '  <div class="list-count">' + item.count.toLocaleString() + '</div>';
@@ -748,7 +794,11 @@ function renderLineas(items) {
 // ── Data Fetch ─────────────────────────────────────────────
 async function refresh() {
   try {
-    const res = await fetch('/stats/analytics/data?days=' + currentDays);
+    let url = '/stats/analytics/data?days=' + currentDays;
+    if (currentLinea) {
+      url += '&linea=' + encodeURIComponent(currentLinea);
+    }
+    const res = await fetch(url);
     const d = await res.json();
 
     const total = d.totalEvents || 0;
@@ -780,13 +830,18 @@ async function refresh() {
 }
 
 // ── Filter Pills ───────────────────────────────────────────
-document.querySelectorAll('.pill').forEach(pill => {
+document.querySelectorAll('.pill[data-days]').forEach(pill => {
   pill.addEventListener('click', () => {
-    document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.pill[data-days]').forEach(p => p.classList.remove('active'));
     pill.classList.add('active');
     currentDays = parseInt(pill.dataset.days);
     refresh();
   });
+});
+
+document.getElementById('linea-filter').addEventListener('change', (e) => {
+  currentLinea = e.target.value;
+  refresh();
 });
 
 // ── Init ───────────────────────────────────────────────────

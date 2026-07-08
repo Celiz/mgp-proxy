@@ -259,8 +259,9 @@ app.get("/stats/analytics", (c) => {
 
 app.get("/stats/analytics/data", async (c) => {
     const days = Number(c.req.query("days") ?? "0");
+    const linea = c.req.query("linea");
     const { getAnalyticsSnapshot } = await import("./lib/analytics.js");
-    const data = await getAnalyticsSnapshot(days);
+    const data = await getAnalyticsSnapshot(days, linea);
     return c.json(data);
 });
 

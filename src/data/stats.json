@@ -1,0 +1,20 @@
+{
+  "BOOT_AT": 1783528784348,
+  "requests": [],
+  "errors": [],
+  "mgpCalls": [],
+  "counts": {
+    "requestsTotal": 0,
+    "byStatus": [],
+    "byPath": [],
+    "byAccion": [],
+    "byParada": [],
+    "cacheHit": 0,
+    "cacheMiss": 0,
+    "cacheStale": 0,
+    "mgpTotal": 0,
+    "mgpOk": 0,
+    "mgp429": 0,
+    "mgpOtherErr": 0
+  }
+}
