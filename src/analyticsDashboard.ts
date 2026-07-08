@@ -1,7 +1,3 @@
-/**
- * Dashboard de Analytics — mapa de calor geográfico + temporal + rankings.
- * Servido en /stats/analytics. Datos via /stats/analytics/data.
- */
 export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -10,31 +6,25 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
 <title>Bondi Proxy — Analytics</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
-<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"><\/script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
   *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
 
   :root {
-    --bg: #0b0e14;
-    --surface: rgba(255,255,255,0.04);
-    --surface-hover: rgba(255,255,255,0.07);
-    --border: rgba(255,255,255,0.06);
-    --text: #e4e8f1;
-    --text-dim: #6b7280;
-    --accent: #818cf8;
-    --accent-glow: rgba(129,140,248,0.25);
-    --green: #34d399;
-    --green-dim: rgba(52,211,153,0.15);
-    --red: #f87171;
-    --red-dim: rgba(248,113,113,0.15);
-    --yellow: #fbbf24;
-    --yellow-dim: rgba(251,191,36,0.15);
-    --cyan: #22d3ee;
-    --orange: #fb923c;
-    --radius: 16px;
-    --radius-sm: 10px;
+    --bg: #121212;
+    --card-bg: #1c1c1c;
+    --border: #2a2a2a;
+    --text: #ffffff;
+    --text-dim: #9ca3af;
+    --accent: #e5e5e5;
+    --blue: #3b82f6;
+    --blue-dim: rgba(59, 130, 246, 0.15);
+    --green: #22c55e;
+    --green-dim: rgba(34, 197, 94, 0.15);
+    --red: #ef4444;
+    --red-dim: rgba(239, 68, 68, 0.15);
+    --radius: 12px;
   }
 
   body {
@@ -46,23 +36,25 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
     -webkit-font-smoothing: antialiased;
   }
 
-  body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background:
-      radial-gradient(ellipse 80% 60% at 20% 10%, rgba(129,140,248,0.08) 0%, transparent 60%),
-      radial-gradient(ellipse 60% 50% at 80% 80%, rgba(251,191,36,0.06) 0%, transparent 60%);
-    pointer-events: none;
-    z-index: 0;
-  }
-
-  .container {
-    position: relative;
-    z-index: 1;
+  /* Bento Grid */
+  .bento-container {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 16px;
     max-width: 1400px;
     margin: 0 auto;
     padding: 24px 20px 48px;
+  }
+
+  .col-span-3 { grid-column: span 3; }
+  .col-span-4 { grid-column: span 4; }
+  .col-span-8 { grid-column: span 8; }
+  .col-span-12 { grid-column: span 12; }
+  .row-span-2 { grid-row: span 2; }
+
+  @media (max-width: 1024px) {
+    .bento-container { display: flex; flex-direction: column; }
+    .row-span-2 { height: auto; }
   }
 
   /* Header */
@@ -70,9 +62,9 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 28px;
-    flex-wrap: wrap;
-    gap: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
   }
 
   .logo {
@@ -82,55 +74,63 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
   }
 
   .logo-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 12px;
-    background: linear-gradient(135deg, var(--orange), var(--yellow));
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--text);
+    color: var(--bg);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 20px;
-    box-shadow: 0 0 20px rgba(251,191,36,0.25);
+    font-size: 16px;
+  }
+
+  .logo-text {
+    display: flex;
+    flex-direction: column;
   }
 
   .logo h1 {
-    font-size: 22px;
+    font-size: 16px;
     font-weight: 700;
-    letter-spacing: -0.5px;
+    line-height: 1.2;
   }
-  .logo h1 span { color: var(--text-dim); font-weight: 500; }
+  .logo span { 
+    color: var(--text-dim); 
+    font-size: 13px; 
+    font-weight: 400; 
+  }
 
   .header-controls {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 24px;
   }
 
   .back-link {
-    color: var(--accent);
+    color: var(--text-dim);
     text-decoration: none;
     font-size: 13px;
     font-weight: 500;
-    opacity: 0.8;
-    transition: opacity 0.2s;
+    transition: color 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
-  .back-link:hover { opacity: 1; }
+  .back-link:hover { color: var(--text); }
 
   /* Filter pills */
   .filter-pills {
     display: flex;
-    gap: 6px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 4px;
+    gap: 4px;
+    background: transparent;
   }
 
   .pill {
-    padding: 6px 14px;
-    border-radius: 8px;
-    font-size: 12px;
-    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
     border: none;
     background: transparent;
@@ -138,129 +138,271 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
     transition: all 0.2s;
   }
 
-  .pill:hover { color: var(--text); background: rgba(255,255,255,0.05); }
-  .pill.active { color: var(--text); background: rgba(129,140,248,0.2); }
+  .pill:hover { color: var(--text); }
+  .pill.active { color: var(--text); background: #333333; }
 
   /* Cards */
   .card {
-    background: var(--surface);
+    background: var(--card-bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 20px;
-    backdrop-filter: blur(12px);
-    transition: background 0.2s, border-color 0.2s;
-    margin-bottom: 20px;
-  }
-  .card:hover {
-    background: var(--surface-hover);
-    border-color: rgba(255,255,255,0.1);
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
-  .card-title {
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: var(--text-dim);
-    margin-bottom: 16px;
+  /* Scroller card for Paradas */
+  .scrollable-card {
+    max-height: 400px;
+    overflow-y: auto;
+  }
+  
+  /* custom scrollbar */
+  .scrollable-card::-webkit-scrollbar { width: 6px; }
+  .scrollable-card::-webkit-scrollbar-track { background: transparent; }
+  .scrollable-card::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+
+  .card-header-flex {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 12px;
+  }
+
+  .card-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.05);
     display: flex;
     align-items: center;
-    gap: 6px;
+    justify-content: center;
+    font-size: 16px;
+    color: var(--text-dim);
+    border: 1px solid rgba(255,255,255,0.1);
   }
 
-  .card-title .icon { font-size: 14px; }
-
-  /* Grid layouts */
-  .grid-2 {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-    gap: 20px;
-    margin-bottom: 20px;
+  .card-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 8px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
   }
-  .grid-2 .card { margin-bottom: 0; }
-
-  .grid-4 {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
-    margin-bottom: 20px;
+  .card-badge.up { background: var(--green-dim); color: var(--green); }
+  .card-badge.down { background: var(--red-dim); color: var(--red); }
+  
+  .card-title {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
   }
-  .grid-4 .card { margin-bottom: 0; }
+  
+  .card-title-main {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .card-title-main .subtitle {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-weight: 400;
+    margin-left: auto;
+  }
 
   .big-number {
-    font-size: 32px;
-    font-weight: 800;
-    letter-spacing: -1.5px;
-    line-height: 1;
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1.2;
+    margin-bottom: 4px;
   }
   .big-label {
     font-size: 12px;
     color: var(--text-dim);
-    margin-top: 4px;
   }
-
-  .color-green { color: var(--green); }
-  .color-accent { color: var(--accent); }
-  .color-yellow { color: var(--yellow); }
-  .color-cyan { color: var(--cyan); }
-  .color-orange { color: var(--orange); }
 
   /* Map */
+  .map-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 400px;
+  }
   #map {
-    height: 420px;
-    border-radius: 12px;
+    flex: 1;
+    border-radius: 8px;
     overflow: hidden;
-    border: 1px solid var(--border);
+    background: #e5e5e5;
   }
 
-  .leaflet-container { background: #0d1117; }
+  .leaflet-container { background: #f0f0f0; }
 
   /* Heatmap grid */
+  .heatmap-container {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  
   .heatmap-grid {
     display: grid;
-    grid-template-columns: 40px repeat(7, 1fr);
-    gap: 3px;
-    font-size: 11px;
+    /* Use minmax to prevent overflow, forcing cells to shrink if needed */
+    grid-template-columns: 28px repeat(24, minmax(0, 1fr));
+    gap: 2px;
   }
 
   .heatmap-label {
     display: flex;
     align-items: center;
-    justify-content: center;
     color: var(--text-dim);
-    font-weight: 500;
     font-size: 10px;
   }
+  .heatmap-label.center { justify-content: center; }
+  .heatmap-label.right { justify-content: flex-end; padding-right: 6px; }
 
   .heatmap-cell {
     aspect-ratio: 1;
-    border-radius: 4px;
-    min-height: 16px;
-    transition: background 0.3s;
-    cursor: pointer;
+    border-radius: 2px;
+    background: #2a2a2a;
+    transition: transform 0.1s;
     position: relative;
+    cursor: pointer;
   }
+  .heatmap-cell:hover { transform: scale(1.3); z-index: 10; border: 1px solid var(--text-dim); }
 
-  .heatmap-cell:hover { outline: 1px solid var(--text-dim); }
-
-  .heatmap-header {
+  .heatmap-header-row {
+    display: grid;
+    grid-template-columns: 28px repeat(24, minmax(0, 1fr));
+    margin-bottom: 4px;
+  }
+  
+  .heatmap-legend {
     display: flex;
     align-items: center;
-    justify-content: center;
+    gap: 8px;
+    margin-top: 16px;
+    font-size: 11px;
     color: var(--text-dim);
-    font-weight: 600;
-    font-size: 10px;
-    text-transform: uppercase;
-    padding: 4px 0;
+  }
+  .heatmap-legend-boxes {
+    display: flex;
+    gap: 2px;
+  }
+  .heatmap-legend-box {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
   }
 
+  /* Bar chart items */
+  .list-container {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .list-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .list-rank {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-dim);
+    width: 16px;
+    text-align: right;
+  }
+
+  .list-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    /* Fix: align to start so it doesn't center in flex */
+    align-items: flex-start;
+    text-align: left;
+    min-width: 0;
+  }
+
+  .list-name {
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+  }
+  
+  .list-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+    margin-top: 2px;
+  }
+
+  .list-progress-bg {
+    width: 100%;
+    height: 4px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 2px;
+    margin-top: 6px;
+    overflow: hidden;
+  }
+  
+  .list-progress-fill {
+    height: 100%;
+    background: var(--text);
+    border-radius: 2px;
+  }
+  .list-progress-fill.blue { background: var(--blue); }
+
+  .list-count {
+    font-size: 13px;
+    font-weight: 700;
+    text-align: right;
+    width: 30px;
+  }
+
+  /* Grid 3 for Lines */
+  .grid-3-list {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    column-gap: 32px;
+    row-gap: 16px;
+  }
+
+  .linea-badge {
+    background: #333333;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .empty-state { text-align: center; padding: 32px; color: var(--text-dim); font-size: 13px; }
+  .loading { text-align: center; padding: 40px; color: var(--text-dim); }
+
+  /* Tooltip */
   .heatmap-tooltip {
     position: fixed;
-    background: rgba(0,0,0,0.9);
+    background: #2a2a2a;
     border: 1px solid var(--border);
     color: var(--text);
     padding: 6px 10px;
-    border-radius: 8px;
+    border-radius: 6px;
     font-size: 11px;
     pointer-events: none;
     z-index: 1000;
@@ -268,118 +410,23 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
     white-space: nowrap;
   }
 
-  /* Bar chart */
-  .bar-chart { margin-top: 8px; }
-
-  .bar-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-    font-size: 13px;
-  }
-
-  .bar-rank {
-    min-width: 24px;
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--text-dim);
-    text-align: center;
-  }
-  .bar-rank.top-3 { color: var(--yellow); }
-
-  .bar-label {
-    min-width: 120px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-family: 'Inter', monospace;
-    font-size: 13px;
-    font-weight: 500;
-  }
-
-  .bar-track {
-    flex: 1;
-    height: 6px;
-    background: rgba(255,255,255,0.05);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-
-  .bar-fill {
-    height: 100%;
-    border-radius: 3px;
-    transition: width 0.5s ease;
-  }
-
-  .bar-fill.parada { background: linear-gradient(90deg, var(--green), #6ee7b7); }
-  .bar-fill.linea  { background: linear-gradient(90deg, var(--accent), #a78bfa); }
-
-  .bar-count {
-    min-width: 50px;
-    text-align: right;
-    font-weight: 600;
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-dim);
-  }
-
-  .empty-state {
-    text-align: center;
-    padding: 32px;
-    color: var(--text-dim);
-    font-size: 13px;
-  }
-
-  .loading {
-    text-align: center;
-    padding: 40px;
-    color: var(--text-dim);
-  }
-
-  .loading::after {
-    content: '';
-    display: inline-block;
-    width: 18px;
-    height: 18px;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    margin-left: 8px;
-    vertical-align: middle;
-  }
-
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  /* Scrollbar */
-  ::-webkit-scrollbar { width: 6px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
-
-  /* Responsive */
-  @media (max-width: 640px) {
-    .container { padding: 16px 12px 32px; }
-    .grid-2 { grid-template-columns: 1fr; }
-    .grid-4 { grid-template-columns: repeat(2, 1fr); }
-    #map { height: 300px; }
-    .big-number { font-size: 24px; }
-    .bar-label { min-width: 80px; }
-    .heatmap-grid { gap: 2px; }
-  }
 </style>
 </head>
 <body>
-<div class="container">
-  <header>
+<div class="bento-container">
+  
+  <header class="col-span-12">
     <div class="logo">
-      <div class="logo-icon">📊</div>
-      <h1>Analytics <span>— paradas y líneas</span></h1>
+      <div class="logo-icon">🌐</div>
+      <div class="logo-text">
+        <h1>Analíticas</h1>
+        <span>Consultas de paradas y líneas</span>
+      </div>
     </div>
     <div class="header-controls">
       <a href="/stats" class="back-link">← Dashboard principal</a>
       <div class="filter-pills">
-        <button class="pill" data-days="1">24h</button>
+        <button class="pill" data-days="1">24 horas</button>
         <button class="pill" data-days="7">7 días</button>
         <button class="pill active" data-days="30">30 días</button>
         <button class="pill" data-days="0">Todo</button>
@@ -388,50 +435,84 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
   </header>
 
   <!-- Summary cards -->
-  <div class="grid-4" id="summary-cards">
-    <div class="card">
-      <div class="card-title"><span class="icon">📍</span> Total consultas</div>
-      <div class="big-number color-accent" id="s-total">—</div>
-      <div class="big-label">eventos registrados</div>
+  <div class="card col-span-3">
+    <div class="card-header-flex">
+      <div class="card-icon">📉</div>
+      <div class="card-badge up">~+12%</div>
     </div>
-    <div class="card">
-      <div class="card-title"><span class="icon">🚏</span> Paradas únicas</div>
-      <div class="big-number color-green" id="s-paradas">—</div>
-      <div class="big-label">paradas distintas</div>
+    <div class="card-title">Total de consultas</div>
+    <div class="big-number" id="s-total">—</div>
+    <div class="big-label">eventos registrados</div>
+  </div>
+  
+  <div class="card col-span-3">
+    <div class="card-header-flex">
+      <div class="card-icon">📍</div>
+      <div class="card-badge down">~-4%</div>
     </div>
-    <div class="card">
-      <div class="card-title"><span class="icon">🚌</span> Líneas únicas</div>
-      <div class="big-number color-yellow" id="s-lineas">—</div>
-      <div class="big-label">líneas distintas</div>
+    <div class="card-title">Paradas únicas</div>
+    <div class="big-number" id="s-paradas">—</div>
+    <div class="big-label">paradas distintas consultadas</div>
+  </div>
+  
+  <div class="card col-span-3">
+    <div class="card-header-flex">
+      <div class="card-icon">🚌</div>
+      <div class="card-badge down">~-8%</div>
     </div>
-    <div class="card">
-      <div class="card-title"><span class="icon">🗺️</span> Con coordenadas</div>
-      <div class="big-number color-cyan" id="s-geo">—</div>
-      <div class="big-label">paradas en el mapa</div>
+    <div class="card-title">Líneas únicas</div>
+    <div class="big-number" id="s-lineas">—</div>
+    <div class="big-label">líneas distintas consultadas</div>
+  </div>
+  
+  <div class="card col-span-3">
+    <div class="card-header-flex">
+      <div class="card-icon">🧭</div>
+    </div>
+    <div class="card-title">Con ubicación</div>
+    <div class="big-number" id="s-geo">—/—</div>
+    <div class="big-label" id="s-geo-label">% de paradas ubicadas en el mapa</div>
+  </div>
+
+  <!-- Row 2: Map (left, span 2 rows) + Heatmap (right) -->
+  <div class="card col-span-8 row-span-2">
+    <div class="card-title-main">
+      <span style="color:var(--text-dim)">📍</span> Mapa de paradas consultadas
+      <span class="subtitle">Toca un círculo para ver el detalle y las líneas consultadas</span>
+    </div>
+    <div class="map-container">
+      <div id="map"></div>
     </div>
   </div>
 
-  <!-- Map -->
-  <div class="card">
-    <div class="card-title"><span class="icon">🔥</span> Mapa de calor — paradas más consultadas</div>
-    <div id="map"></div>
+  <div class="card col-span-4">
+    <div class="card-title-main">
+      <span style="color:var(--text-dim)">🕐</span> Actividad por hora y día
+      <div style="margin-left:auto; text-align:right; line-height:1.2;">
+        <div style="font-size:10px; color:var(--text-dim);">Hora pico</div>
+        <div style="font-size:11px; font-weight:600;" id="peak-hour">—</div>
+      </div>
+    </div>
+    <div id="time-heatmap" class="loading">Cargando...</div>
+  </div>
+  
+  <!-- Row 3: Top Paradas (right side, under Heatmap) -->
+  <div class="card col-span-4 scrollable-card">
+    <div class="card-title-main" style="position: sticky; top: 0; background: var(--card-bg); z-index: 5; padding-bottom: 8px;">
+      <span style="color:var(--text-dim)">📍</span> Paradas más consultadas
+      <span class="subtitle" id="top-paradas-count">— consultas</span>
+    </div>
+    <div id="top-paradas" class="list-container loading">Cargando...</div>
   </div>
 
-  <!-- Heatmap temporal + Rankings -->
-  <div class="grid-2">
-    <div class="card">
-      <div class="card-title"><span class="icon">🕐</span> Actividad por hora y día</div>
-      <div id="time-heatmap" class="loading">Cargando</div>
+  <!-- Row 4: Top Lineas (Full width) -->
+  <div class="card col-span-12">
+    <div class="card-title-main">
+      <span style="color:var(--text-dim)">🚌</span> Líneas más consultadas
+      <span class="subtitle" id="top-lineas-count">— consultas</span>
     </div>
-    <div class="card">
-      <div class="card-title"><span class="icon">🏆</span> Top paradas</div>
-      <div id="top-paradas" class="loading">Cargando</div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-title"><span class="icon">🚌</span> Top líneas consultadas</div>
-    <div id="top-lineas" class="loading">Cargando</div>
+    <!-- Note the grid-3-list class below handles the 3 column layout -->
+    <div id="top-lineas" class="grid-3-list loading">Cargando...</div>
   </div>
 </div>
 
@@ -441,19 +522,18 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
 // ── State ──────────────────────────────────────────────────
 let currentDays = 30;
 let map = null;
-let heatLayer = null;
 let markersLayer = null;
 
 // ── Map Init ───────────────────────────────────────────────
 function initMap() {
   map = L.map('map', {
-    center: [-38.0055, -57.5426], // Mar del Plata
-    zoom: 13,
+    center: [-38.0055, -57.5426],
+    zoom: 12,
     zoomControl: true,
     attributionControl: false,
   });
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
     maxZoom: 19,
   }).addTo(map);
 
@@ -467,110 +547,120 @@ function initMap() {
 
 function updateMap(paradaGeo) {
   if (!map) return;
-
-  // Clear previous
-  if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
   markersLayer.clearLayers();
-
   if (!paradaGeo || paradaGeo.length === 0) return;
 
-  // Heat layer
   const maxCount = Math.max(...paradaGeo.map(p => p.count));
-  const heatPoints = paradaGeo.map(p => [
-    p.lat, p.lng, p.count / maxCount
-  ]);
 
-  heatLayer = L.heatLayer(heatPoints, {
-    radius: 25,
-    blur: 20,
-    maxZoom: 16,
-    max: 1,
-    gradient: {
-      0.2: '#1a1a2e',
-      0.4: '#16213e',
-      0.5: '#0f3460',
-      0.6: '#818cf8',
-      0.7: '#fbbf24',
-      0.85: '#fb923c',
-      1.0: '#f87171'
-    }
-  }).addTo(map);
-
-  // Markers for top paradas
-  const topN = paradaGeo.slice(0, 30);
-  for (const p of topN) {
-    const size = Math.max(6, Math.min(20, (p.count / maxCount) * 20));
+  for (const p of paradaGeo) {
+    const size = Math.max(5, Math.min(25, (p.count / maxCount) * 25));
     const marker = L.circleMarker([p.lat, p.lng], {
       radius: size,
-      fillColor: '#818cf8',
-      fillOpacity: 0.7,
-      color: '#e4e8f1',
+      fillColor: '#3b82f6',
+      fillOpacity: 0.5,
+      color: '#2563eb',
       weight: 1,
     });
 
+    const lineasText = p.lineas && p.lineas.length > 0 
+      ? '<div style="margin-top:6px; padding-top:6px; border-top: 1px solid #e5e5e5; font-size:11px; color:#4b5563;">' +
+        '<strong>Líneas más consultadas aquí:</strong><br>' + 
+        p.lineas.map(l => '<span style="display:inline-block; margin-right:8px; margin-top:4px;"><span style="background:#f3f4f6; padding:2px 4px; border-radius:4px; font-weight:600; color:#111;">' + l.linea + '</span> (' + l.count + ')</span>').join('') + 
+        '</div>'
+      : '<div style="margin-top:6px; padding-top:6px; border-top: 1px solid #e5e5e5; font-size:11px; color:#9ca3af;">Sin desglose de líneas</div>';
+
     marker.bindPopup(
-      '<div style="font-family:Inter,sans-serif;font-size:13px;line-height:1.5">' +
-        '<strong style="font-size:15px">' + (p.nombre || 'Parada ' + p.codigo) + '</strong><br>' +
-        '<span style="color:#6b7280">Código: ' + p.codigo + '</span><br>' +
-        '<span style="color:#818cf8;font-weight:700;font-size:16px">' + p.count.toLocaleString() + '</span> consultas' +
-      '</div>',
-      { className: 'dark-popup' }
+      '<div style="font-family:Inter,sans-serif;font-size:12px;line-height:1.4;color:#111;min-width:180px;">' +
+        '<div style="font-size:14px; font-weight:700; margin-bottom: 2px;">' + (p.nombre || 'Parada ' + p.codigo) + '</div>' +
+        '<div style="color:#6b7280; font-size:11px; margin-bottom: 4px;">Código: ' + p.codigo + '</div>' +
+        '<div style="font-size:13px; margin-bottom: 4px;"><strong style="color:#3b82f6; font-size:15px;">' + p.count.toLocaleString() + '</strong> consultas totales</div>' +
+        lineasText +
+      '</div>'
     );
 
     marker.addTo(markersLayer);
   }
 
-  // Fit bounds if we have points
   if (paradaGeo.length > 0) {
     const bounds = L.latLngBounds(paradaGeo.map(p => [p.lat, p.lng]));
-    map.fitBounds(bounds, { padding: [30, 30], maxZoom: 14 });
+    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
   }
 }
 
 // ── Time Heatmap ───────────────────────────────────────────
 const DAYS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+const HOURS_HEADER = [0,3,6,9,12,15,18,21];
 
 function renderTimeHeatmap(cells) {
   const container = document.getElementById('time-heatmap');
 
   if (!cells || cells.length === 0) {
     container.innerHTML = '<div class="empty-state">Sin datos de actividad aún</div>';
+    document.getElementById('peak-hour').textContent = '—';
     return;
   }
 
-  // Build matrix[hour][dow]
   const matrix = {};
   let maxVal = 0;
-  for (const c of cells) {
-    const key = c.hour + ':' + c.dow;
-    matrix[key] = c.count;
-    if (c.count > maxVal) maxVal = c.count;
-  }
-
-  let html = '<div class="heatmap-grid">';
+  let peakKey = '';
   
-  // Header row
-  html += '<div></div>'; // empty top-left corner
-  for (let d = 0; d < 7; d++) {
-    html += '<div class="heatmap-header">' + DAYS[d] + '</div>';
+  for (const c of cells) {
+    const key = c.dow + ':' + c.hour;
+    matrix[key] = c.count;
+    if (c.count > maxVal) {
+      maxVal = c.count;
+      peakKey = key;
+    }
   }
 
-  // Rows: each hour
+  if (peakKey) {
+    const [d, h] = peakKey.split(':');
+    document.getElementById('peak-hour').textContent = DAYS[d] + ' • ' + String(h).padStart(2,'0') + ':00';
+  } else {
+    document.getElementById('peak-hour').textContent = '—';
+  }
+
+  let html = '<div class="heatmap-container">';
+  
+  html += '<div class="heatmap-header-row">';
+  html += '<div></div>'; 
   for (let h = 0; h < 24; h++) {
-    html += '<div class="heatmap-label">' + String(h).padStart(2, '0') + '</div>';
-    for (let d = 0; d < 7; d++) {
-      const count = matrix[h + ':' + d] || 0;
+    if (HOURS_HEADER.includes(h)) {
+      html += '<div class="heatmap-label center">' + String(h).padStart(2, '0') + '</div>';
+    } else {
+      html += '<div></div>';
+    }
+  }
+  html += '</div>';
+
+  html += '<div class="heatmap-grid">';
+  for (let d = 0; d < 7; d++) {
+    html += '<div class="heatmap-label right">' + DAYS[d] + '</div>';
+    for (let h = 0; h < 24; h++) {
+      const count = matrix[d + ':' + h] || 0;
       const intensity = maxVal > 0 ? count / maxVal : 0;
       const bg = intensityColor(intensity);
       html += '<div class="heatmap-cell" style="background:' + bg + '" ' +
         'data-hour="' + h + '" data-dow="' + d + '" data-count="' + count + '"></div>';
     }
   }
+  html += '</div>';
+
+  html += '<div class="heatmap-legend">';
+  html += '<span>Menos</span>';
+  html += '<div class="heatmap-legend-boxes">';
+  html += '<div class="heatmap-legend-box" style="background:#2a2a2a"></div>';
+  html += '<div class="heatmap-legend-box" style="background:#52525b"></div>';
+  html += '<div class="heatmap-legend-box" style="background:#9ca3af"></div>';
+  html += '<div class="heatmap-legend-box" style="background:#e5e5e5"></div>';
+  html += '<div class="heatmap-legend-box" style="background:#ffffff"></div>';
+  html += '</div>';
+  html += '<span>Más consultas</span>';
+  html += '</div>';
 
   html += '</div>';
   container.innerHTML = html;
 
-  // Tooltip
   const tooltip = document.getElementById('hm-tooltip');
   container.addEventListener('mousemove', (e) => {
     const cell = e.target.closest('.heatmap-cell');
@@ -587,32 +677,72 @@ function renderTimeHeatmap(cells) {
 }
 
 function intensityColor(t) {
-  if (t === 0) return 'rgba(255,255,255,0.03)';
-  // Interpolate from dark blue → purple → orange → red
-  if (t < 0.25) return 'rgba(129, 140, 248, ' + (0.15 + t * 1.4) + ')';
-  if (t < 0.5)  return 'rgba(167, 139, 250, ' + (0.3 + t * 0.8) + ')';
-  if (t < 0.75) return 'rgba(251, 191, 36, ' + (0.4 + t * 0.5) + ')';
-  return 'rgba(248, 113, 113, ' + (0.6 + t * 0.4) + ')';
+  if (t === 0) return '#2a2a2a';
+  if (t < 0.25) return '#52525b';
+  if (t < 0.5)  return '#71717a';
+  if (t < 0.75) return '#a1a1aa';
+  if (t < 0.9)  return '#d4d4d8';
+  return '#ffffff';
 }
 
-// ── Bar Charts ─────────────────────────────────────────────
-function renderBars(containerId, items, cssClass) {
-  const el = document.getElementById(containerId);
+// ── Render Lists ───────────────────────────────────────────
+function renderParadas(items) {
+  const el = document.getElementById('top-paradas');
   if (!items || !items.length) {
     el.innerHTML = '<div class="empty-state">Sin datos aún</div>';
     return;
   }
+  
   const mx = Math.max(...items.map(i => i.count));
-  el.innerHTML = items.map((item, idx) => {
+  
+  let html = '';
+  // Muestra hasta 50 para que el usuario pueda scrollear dentro del contenedor
+  items.slice(0, 50).forEach((item, idx) => {
     const pct = mx > 0 ? (item.count / mx) * 100 : 0;
-    const rankClass = idx < 3 ? ' top-3' : '';
-    return '<div class="bar-item">' +
-      '<span class="bar-rank' + rankClass + '">#' + (idx + 1) + '</span>' +
-      '<span class="bar-label" title="' + item.key + '">' + item.key + '</span>' +
-      '<div class="bar-track"><div class="bar-fill ' + cssClass + '" style="width:' + pct + '%"></div></div>' +
-      '<span class="bar-count">' + item.count.toLocaleString() + '</span>' +
-    '</div>';
-  }).join('');
+    const name = item.nombre || item.key;
+    const subtitle = item.lineas && item.lineas.length > 0 ? item.lineas.map(l => l.linea).join(', ') : 'Sin líneas registradas';
+    
+    html += '<div class="list-item">';
+    html += '  <div class="list-rank">' + (idx + 1) + '</div>';
+    html += '  <div class="list-info">';
+    html += '    <div class="list-name" title="' + name + '">' + name + '</div>';
+    html += '    <div class="list-sub">' + subtitle + '</div>';
+    html += '    <div class="list-progress-bg"><div class="list-progress-fill" style="width:' + pct + '%"></div></div>';
+    html += '  </div>';
+    html += '  <div class="list-count">' + item.count.toLocaleString() + '</div>';
+    html += '</div>';
+  });
+  
+  el.innerHTML = html;
+}
+
+function renderLineas(items) {
+  const el = document.getElementById('top-lineas');
+  if (!items || !items.length) {
+    el.innerHTML = '<div class="empty-state">Sin datos aún</div>';
+    return;
+  }
+
+  const mx = Math.max(...items.map(i => i.count));
+  
+  let html = '';
+  items.slice(0, 15).forEach((item, idx) => {
+    const pct = mx > 0 ? (item.count / mx) * 100 : 0;
+    const code = item.key;
+    const route = item.nombre || (code + ' Route');
+    
+    html += '<div class="list-item">';
+    html += '  <div class="list-rank">' + (idx + 1) + '</div>';
+    html += '  <div class="linea-badge">' + code + '</div>';
+    html += '  <div class="list-info">';
+    html += '    <div class="list-name" title="' + route + '">' + route + '</div>';
+    html += '    <div class="list-progress-bg"><div class="list-progress-fill blue" style="width:' + pct + '%"></div></div>';
+    html += '  </div>';
+    html += '  <div class="list-count">' + item.count.toLocaleString() + '</div>';
+    html += '</div>';
+  });
+  
+  el.innerHTML = html;
 }
 
 // ── Data Fetch ─────────────────────────────────────────────
@@ -621,21 +751,28 @@ async function refresh() {
     const res = await fetch('/stats/analytics/data?days=' + currentDays);
     const d = await res.json();
 
-    // Summary
-    document.getElementById('s-total').textContent = (d.totalEvents || 0).toLocaleString();
-    document.getElementById('s-paradas').textContent = (d.topParadas?.length || 0).toLocaleString();
-    document.getElementById('s-lineas').textContent = (d.topLineas?.length || 0).toLocaleString();
-    document.getElementById('s-geo').textContent = (d.paradaGeo?.length || 0).toLocaleString();
+    const total = d.totalEvents || 0;
+    document.getElementById('s-total').textContent = total.toLocaleString();
+    
+    const paradasCount = d.topParadas?.length || 0;
+    document.getElementById('s-paradas').textContent = paradasCount.toLocaleString();
+    
+    const lineasCount = d.topLineas?.length || 0;
+    document.getElementById('s-lineas').textContent = lineasCount.toLocaleString();
+    
+    const geoCount = d.paradaGeo?.length || 0;
+    document.getElementById('s-geo').textContent = geoCount + '/' + paradasCount;
+    if (paradasCount > 0) {
+      document.getElementById('s-geo-label').textContent = Math.round((geoCount / paradasCount) * 100) + '% de paradas ubicadas en el mapa';
+    }
 
-    // Map
+    document.getElementById('top-paradas-count').textContent = (total || 0).toLocaleString() + ' consultas';
+    document.getElementById('top-lineas-count').textContent = (total || 0).toLocaleString() + ' consultas';
+
     updateMap(d.paradaGeo);
-
-    // Time heatmap
     renderTimeHeatmap(d.heatmap);
-
-    // Rankings
-    renderBars('top-paradas', d.topParadas, 'parada');
-    renderBars('top-lineas', d.topLineas, 'linea');
+    renderParadas(d.topParadas);
+    renderLineas(d.topLineas);
 
   } catch (e) {
     console.error('Analytics refresh failed:', e);
@@ -655,8 +792,12 @@ document.querySelectorAll('.pill').forEach(pill => {
 // ── Init ───────────────────────────────────────────────────
 initMap();
 refresh();
-// Auto-refresh every 60s (analytics doesn't need to be as fast as the main dashboard)
 setInterval(refresh, 60_000);
+
+// Auto-resize map on window resize (fixes Leaflet grey tiles bug in flex containers)
+window.addEventListener('resize', () => {
+  if (map) map.invalidateSize();
+});
 <\/script>
 </body>
 </html>`;

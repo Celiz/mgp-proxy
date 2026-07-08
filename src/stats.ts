@@ -5,7 +5,12 @@
  * problemas.
  */
 
-const BOOT_AT = Date.now();
+import fs from "fs";
+import path from "path";
+
+const STATS_FILE = path.join(process.cwd(), "src/data/stats.json");
+
+let BOOT_AT = Date.now();
 const RING_SIZE = 200;
 
 type RequestRecord = {
@@ -167,4 +172,65 @@ export function snapshot() {
         errors: errors.slice(-30).reverse(),
         recentRequests: requests.slice(-30).reverse(),
     };
+}
+
+export async function saveStats() {
+    try {
+        const data = {
+            BOOT_AT,
+            requests,
+            errors,
+            mgpCalls,
+            counts: {
+                requestsTotal: counts.requestsTotal,
+                byStatus: Array.from(counts.byStatus.entries()),
+                byPath: Array.from(counts.byPath.entries()),
+                byAccion: Array.from(counts.byAccion.entries()),
+                byParada: Array.from(counts.byParada.entries()),
+                cacheHit: counts.cacheHit,
+                cacheMiss: counts.cacheMiss,
+                cacheStale: counts.cacheStale,
+                mgpTotal: counts.mgpTotal,
+                mgpOk: counts.mgpOk,
+                mgp429: counts.mgp429,
+                mgpOtherErr: counts.mgpOtherErr,
+            },
+        };
+        await fs.promises.writeFile(STATS_FILE, JSON.stringify(data, null, 2), "utf-8");
+    } catch (e) {
+        console.error("[stats] Error saving stats:", e);
+    }
+}
+
+export async function loadStats() {
+    try {
+        if (fs.existsSync(STATS_FILE)) {
+            const fileData = await fs.promises.readFile(STATS_FILE, "utf-8");
+            const data = JSON.parse(fileData);
+            
+            if (data.BOOT_AT) BOOT_AT = data.BOOT_AT;
+            
+            requests.splice(0, requests.length, ...(data.requests || []));
+            errors.splice(0, errors.length, ...(data.errors || []));
+            mgpCalls.splice(0, mgpCalls.length, ...(data.mgpCalls || []));
+            
+            if (data.counts) {
+                counts.requestsTotal = data.counts.requestsTotal ?? 0;
+                counts.byStatus = new Map(data.counts.byStatus || []);
+                counts.byPath = new Map(data.counts.byPath || []);
+                counts.byAccion = new Map(data.counts.byAccion || []);
+                counts.byParada = new Map(data.counts.byParada || []);
+                counts.cacheHit = data.counts.cacheHit ?? 0;
+                counts.cacheMiss = data.counts.cacheMiss ?? 0;
+                counts.cacheStale = data.counts.cacheStale ?? 0;
+                counts.mgpTotal = data.counts.mgpTotal ?? 0;
+                counts.mgpOk = data.counts.mgpOk ?? 0;
+                counts.mgp429 = data.counts.mgp429 ?? 0;
+                counts.mgpOtherErr = data.counts.mgpOtherErr ?? 0;
+            }
+            console.log("[stats] Loaded existing stats from", STATS_FILE);
+        }
+    } catch (e) {
+        console.error("[stats] Error loading stats:", e);
+    }
 }

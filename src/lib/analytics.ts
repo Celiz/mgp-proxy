@@ -93,7 +93,7 @@ if (supabase) {
 // Queries para el dashboard
 // ---------------------------------------------------------------------------
 
-export type TopItem = { key: string; count: number };
+export type TopItem = { key: string; count: number; lineas?: { linea: string; count: number }[] };
 export type HeatmapCell = { hour: number; dow: number; count: number };
 export type ParadaGeoPoint = {
     codigo: string;
@@ -101,6 +101,7 @@ export type ParadaGeoPoint = {
     lat: number;
     lng: number;
     count: number;
+    lineas?: { linea: string; count: number }[];
 };
 
 /**
@@ -113,7 +114,7 @@ export async function getTopParadas(limit = 20, days = 0): Promise<TopItem[]> {
     try {
         let q = supabase
             .from("query_events")
-            .select("codigo_parada")
+            .select("codigo_parada, linea")
             .not("codigo_parada", "is", null);
 
         if (days > 0) {
@@ -124,16 +125,30 @@ export async function getTopParadas(limit = 20, days = 0): Promise<TopItem[]> {
         const { data, error } = await q.limit(50_000);
         if (error || !data) return [];
 
-        const counts = new Map<string, number>();
+        const counts = new Map<string, { count: number; lineas: Map<string, number> }>();
         for (const row of data) {
             const k = row.codigo_parada as string;
-            counts.set(k, (counts.get(k) ?? 0) + 1);
+            const l = row.linea as string | null;
+            if (!counts.has(k)) {
+                counts.set(k, { count: 0, lineas: new Map() });
+            }
+            const info = counts.get(k)!;
+            info.count++;
+            if (l) {
+                info.lineas.set(l, (info.lineas.get(l) ?? 0) + 1);
+            }
         }
 
         return [...counts.entries()]
-            .sort((a, b) => b[1] - a[1])
+            .sort((a, b) => b[1].count - a[1].count)
             .slice(0, limit)
-            .map(([key, count]) => ({ key, count }));
+            .map(([key, info]) => {
+                const topLineas = [...info.lineas.entries()]
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 3)
+                    .map(([linea, count]) => ({ linea, count }));
+                return { key, count: info.count, lineas: topLineas };
+            });
     } catch (e) {
         console.error("[analytics] Error en getTopParadas:", (e as Error).message);
         return [];
@@ -221,18 +236,22 @@ export async function getParadaGeoData(days = 0): Promise<ParadaGeoPoint[]> {
 
     // 2. Get counts per parada
     const topParadas = await getTopParadas(1000, days);
-    const countMap = new Map(topParadas.map((p) => [p.key, p.count]));
+    const paradaMap = new Map(topParadas.map((p) => [p.key, p]));
 
     // 3. Merge
     return geoData
         .filter((g) => g.lat && g.lng)
-        .map((g) => ({
-            codigo: g.codigo as string,
-            nombre: g.nombre as string | null,
-            lat: g.lat as number,
-            lng: g.lng as number,
-            count: countMap.get(g.codigo as string) ?? 0,
-        }))
+        .map((g) => {
+            const pData = paradaMap.get(g.codigo as string);
+            return {
+                codigo: g.codigo as string,
+                nombre: g.nombre as string | null,
+                lat: g.lat as number,
+                lng: g.lng as number,
+                count: pData?.count ?? 0,
+                lineas: pData?.lineas ?? [],
+            };
+        })
         .filter((p) => p.count > 0)
         .sort((a, b) => b.count - a.count);
 }

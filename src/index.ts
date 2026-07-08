@@ -14,6 +14,8 @@ import {
     recordParada,
     recordRequest,
     snapshot,
+    loadStats,
+    saveStats,
 } from "./stats.js";
 import { dashboardHtml } from "./dashboard.js";
 import { analyticsDashboardHtml } from "./analyticsDashboard.js";
@@ -263,5 +265,23 @@ app.get("/stats/analytics/data", async (c) => {
 });
 
 // 6. Start Server
-console.log(`[bondi-proxy] Iniciando en puerto ${env.PORT} con Node.js 🚀`);
-serve({ fetch: app.fetch, port: env.PORT, hostname: env.HOST });
+async function start() {
+    await loadStats();
+    
+    // Guardar periódicamente cada 1 minuto
+    setInterval(saveStats, 60_000);
+    
+    // Guardar en apagado seguro
+    const shutdown = async (signal: string) => {
+        console.log(`\n[bondi-proxy] Recibido ${signal}, guardando stats antes de apagar...`);
+        await saveStats();
+        process.exit(0);
+    };
+    process.on("SIGINT", () => shutdown("SIGINT"));
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+    console.log(`[bondi-proxy] Iniciando en puerto ${env.PORT} con Node.js 🚍`);
+    serve({ fetch: app.fetch, port: env.PORT, hostname: env.HOST });
+}
+
+start();
