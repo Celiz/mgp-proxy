@@ -152,6 +152,13 @@ export type AnalyticsSnapshot = {
 let paradaCanonical: Map<string, string> | null = null;
 let paradaNames: Map<string, string> | null = null;
 
+function cleanStreetLabel(label: string): string {
+    return String(label)
+        .replace(/\s*-\s*MAR DEL PLATA/i, "")
+        .replace(/\s*-\s*BARRIO\s+.+$/i, "")
+        .trim();
+}
+
 function loadParadaMaps(): { canonical: Map<string, string>; names: Map<string, string> } {
     if (paradaCanonical && paradaNames) {
         return { canonical: paradaCanonical, names: paradaNames };
@@ -161,23 +168,46 @@ function loadParadaMaps(): { canonical: Map<string, string>; names: Map<string, 
     try {
         const dir = path.join(process.cwd(), "src/data/static/linea");
         if (fs.existsSync(dir)) {
-            for (const f of fs.readdirSync(dir)) {
-                if (!f.endsWith(".json")) continue;
-                const fileData = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
-                const lineaNom = fileData.meta?.Descripcion ?? "";
-                for (const [calleKey, arr] of Object.entries(fileData.paradasByCalleInterseccion ?? {})) {
-                    // calles array may have labels
-                    const calleLabel =
-                        (fileData.calles as Array<{ value: string; label: string }> | undefined)?.find(
-                            (c) => c.value === calleKey,
-                        )?.label ?? String(calleKey);
-
-                    for (const p of arr as Array<{
+            const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+            // 1) Mapa global código calle → nombre (las keys de paradas son "calle\tintersección")
+            const streetByCode = new Map<string, string>();
+            type LineFile = {
+                calles?: Array<{ value: string; label: string }>;
+                paradasByCalleInterseccion?: Record<
+                    string,
+                    Array<{
                         Codigo?: string;
                         Identificador?: string;
                         Descripcion?: string;
                         AbreviaturaBandera?: string;
-                    }>) {
+                    }>
+                >;
+            };
+            const parsed: LineFile[] = [];
+            for (const f of files) {
+                const fileData = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as LineFile;
+                parsed.push(fileData);
+                for (const c of fileData.calles ?? []) {
+                    if (c.value && c.label) streetByCode.set(String(c.value), c.label);
+                }
+            }
+
+            // 2) Alias Codigo↔Identificador + nombres legibles
+            for (const fileData of parsed) {
+                for (const [calleKey, arr] of Object.entries(fileData.paradasByCalleInterseccion ?? {})) {
+                    // keys: "5429\t5484" (calle principal + intersección)
+                    const parts = String(calleKey).split("\t").filter(Boolean);
+                    const streetLabels = parts
+                        .map((code) => streetByCode.get(code))
+                        .filter((l): l is string => !!l)
+                        .map(cleanStreetLabel)
+                        .filter(Boolean);
+                    const intersectionLabel =
+                        streetLabels.length >= 2
+                            ? streetLabels.join(" y ")
+                            : streetLabels[0] ?? null;
+
+                    for (const p of arr) {
                         if (!p.Identificador) continue;
                         const id = String(p.Identificador);
                         paradaCanonical.set(id, id);
@@ -185,11 +215,9 @@ function loadParadaMaps(): { canonical: Map<string, string>; names: Map<string, 
                             paradaCanonical.set(String(p.Codigo), id);
                         }
                         const ramal = p.AbreviaturaBandera ? ` · ${p.AbreviaturaBandera}` : "";
-                        let base = String(calleLabel).replace(/\s*-\s*MAR DEL PLATA/i, "").trim();
-                        // keys crudas tipo "5429\t5484" no sirven como nombre
-                        if (!base || /[\t]/.test(base) || /^\d+(\s+\d+)*$/.test(base)) {
-                            base = p.Descripcion ? `Parada ${p.Descripcion}` : id;
-                        }
+                        const base =
+                            intersectionLabel ??
+                            (p.Descripcion ? `Parada ${p.Descripcion}` : id);
                         const name = `${base}${ramal}`;
                         if (!paradaNames.has(id) || name.length > (paradaNames.get(id)?.length ?? 0)) {
                             paradaNames.set(id, name);
@@ -439,19 +467,17 @@ export function trackQuery(payload: TrackPayload | string, codigoParada?: string
     if (!supabase) return;
     if (isArribo && !parada && !lineaNorm) return;
 
-    const row: DbEvent = {
+    // Siempre guardamos extras en el buffer; al flush se strippean si el schema es básico.
+    // (Evita perder ramal/client/cache en eventos previos a probeSchema.)
+    buffer.push({
         accion: p.accion,
         codigo_parada: parada,
         linea: lineaNorm,
-    };
-    if (schemaExtended) {
-        row.ramal = ramal;
-        row.client_hash = clientHash;
-        row.cache_status = cache;
-        row.duration_ms = durationMs;
-    }
-
-    buffer.push(row);
+        ramal,
+        client_hash: clientHash,
+        cache_status: cache,
+        duration_ms: durationMs,
+    });
     if (buffer.length >= FLUSH_THRESHOLD) void flushBuffer();
 }
 
@@ -586,10 +612,11 @@ async function fetchEvents(
         ? "ts, accion, codigo_parada, linea, ramal, client_hash, cache_status, duration_ms"
         : "ts, accion, codigo_parada, linea";
 
+    // ORDER BY estable: sin orden, .range() puede repetir/omitir filas entre páginas
     const pages = Math.ceil(count / PAGE_SIZE);
     const results = await Promise.all(
         Array.from({ length: pages }, (_, i) => {
-            let q = supabase!.from("query_events").select(select);
+            let q = supabase!.from("query_events").select(select).order("ts", { ascending: true });
             if (acciones?.length === 1) q = q.eq("accion", acciones[0]!);
             else if (acciones && acciones.length > 1) q = q.in("accion", acciones);
             if (days > 0) q = q.gte("ts", new Date(Date.now() - days * 86_400_000).toISOString());
