@@ -163,8 +163,10 @@ app.post("/", async (c) => {
     recordAccion(accion);
     const parada = bodyParams.get("CodigoParada") ?? bodyParams.get("codigoParada") ?? bodyParams.get("parada") ?? bodyParams.get("identificadorParada");
     if (parada) recordParada(parada);
+    // Preferir código de línea MGP (mapeable a nombre) antes que campos ambiguos
     let linea = bodyParams.get("CodigoLineaParada") ?? bodyParams.get("codigoLineaParada") ?? bodyParams.get("CodigoLinea") ?? bodyParams.get("Linea") ?? bodyParams.get("linea");
     if (linea && lineaMap.has(linea)) linea = lineaMap.get(linea) as string;
+    // Analytics de producto: solo arribos (trackQuery filtra por acción)
     trackQuery(accion, parada, linea);
 
     if (cached && now - cached.at < freshTtl) {
@@ -274,7 +276,13 @@ async function start() {
     
     // Guardar en apagado seguro
     const shutdown = async (signal: string) => {
-        console.log(`\n[bondi-proxy] Recibido ${signal}, guardando stats antes de apagar...`);
+        console.log(`\n[bondi-proxy] Recibido ${signal}, guardando stats/analytics antes de apagar...`);
+        try {
+            const { flushAnalyticsBuffer } = await import("./lib/analytics.js");
+            await flushAnalyticsBuffer();
+        } catch {
+            // analytics opcional
+        }
         await saveStats();
         process.exit(0);
     };

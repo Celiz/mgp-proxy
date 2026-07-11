@@ -420,7 +420,7 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
       <div class="logo-icon">🌐</div>
       <div class="logo-text">
         <h1>Analíticas</h1>
-        <span>Consultas de paradas y líneas</span>
+        <span>Demanda de arribos (próximos colectivos)</span>
       </div>
     </div>
     <div class="header-controls">
@@ -468,35 +468,32 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
     </div>
   </header>
 
-  <!-- Summary cards -->
+  <!-- Summary cards (métricas reales; sin tendencias inventadas) -->
   <div class="card col-span-3">
     <div class="card-header-flex">
       <div class="card-icon">📉</div>
-      <div class="card-badge up">~+12%</div>
     </div>
-    <div class="card-title">Total de consultas</div>
+    <div class="card-title">Consultas de arribos</div>
     <div class="big-number" id="s-total">—</div>
-    <div class="big-label">eventos registrados</div>
+    <div class="big-label">solo RecuperarProximosArribosW</div>
   </div>
   
   <div class="card col-span-3">
     <div class="card-header-flex">
       <div class="card-icon">📍</div>
-      <div class="card-badge down">~-4%</div>
     </div>
     <div class="card-title">Paradas únicas</div>
     <div class="big-number" id="s-paradas">—</div>
-    <div class="big-label">paradas distintas consultadas</div>
+    <div class="big-label">paradas distintas con arribos</div>
   </div>
   
   <div class="card col-span-3">
     <div class="card-header-flex">
       <div class="card-icon">🚌</div>
-      <div class="card-badge down">~-8%</div>
     </div>
     <div class="card-title">Líneas únicas</div>
     <div class="big-number" id="s-lineas">—</div>
-    <div class="big-label">líneas distintas consultadas</div>
+    <div class="big-label">líneas distintas pedidas</div>
   </div>
   
   <div class="card col-span-3">
@@ -511,8 +508,8 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
   <!-- Row 2: Map (left, span 2 rows) + Heatmap (right) -->
   <div class="card col-span-8 row-span-2">
     <div class="card-title-main">
-      <span style="color:var(--text-dim)">📍</span> Mapa de paradas consultadas
-      <span class="subtitle">Toca un círculo para ver el detalle y las líneas consultadas</span>
+      <span style="color:var(--text-dim)">📍</span> Mapa de demanda de arribos
+      <span class="subtitle">Tamaño = consultas de próximos arribos. Tocá un círculo para el detalle</span>
     </div>
     <div class="map-container">
       <div id="map"></div>
@@ -599,24 +596,17 @@ function updateMap(paradaGeo) {
 
     const lineasText = p.lineas && p.lineas.length > 0 
       ? '<div style="margin-top:6px; padding-top:6px; border-top: 1px solid #e5e5e5; font-size:11px; color:#4b5563;">' +
-        '<strong>Líneas más consultadas aquí:</strong><br>' + 
+        '<strong>Líneas pedidas en esta parada:</strong><br>' + 
         p.lineas.map(l => '<span style="display:inline-block; margin-right:8px; margin-top:4px;"><span style="background:#f3f4f6; padding:2px 4px; border-radius:4px; font-weight:600; color:#111;">' + l.linea + '</span> (' + l.count + ')</span>').join('') + 
         '</div>'
       : '<div style="margin-top:6px; padding-top:6px; border-top: 1px solid #e5e5e5; font-size:11px; color:#9ca3af;">Sin desglose de líneas</div>';
-
-    const ramalesText = p.ramales && p.ramales.length > 0 
-      ? '<div style="margin-top:6px; padding-top:6px; border-top: 1px dashed #e5e5e5; font-size:11px; color:#4b5563;">' +
-        '<strong>Ramales:</strong> ' + p.ramales.join(', ') + 
-        '</div>'
-      : '';
 
     marker.bindPopup(
       '<div style="font-family:Inter,sans-serif;font-size:12px;line-height:1.4;color:#111;min-width:180px;">' +
         '<div style="font-size:14px; font-weight:700; margin-bottom: 2px;">' + (p.nombre || 'Parada ' + p.codigo) + '</div>' +
         '<div style="color:#6b7280; font-size:11px; margin-bottom: 4px;">Código: ' + p.codigo + '</div>' +
-        '<div style="font-size:13px; margin-bottom: 4px;"><strong style="color:#3b82f6; font-size:15px;">' + p.count.toLocaleString() + '</strong> consultas totales</div>' +
+        '<div style="font-size:13px; margin-bottom: 4px;"><strong style="color:#3b82f6; font-size:15px;">' + p.count.toLocaleString() + '</strong> consultas de arribos</div>' +
         lineasText +
-        ramalesText +
       '</div>'
     );
 
@@ -748,7 +738,11 @@ function renderParadas(items) {
   items.slice(0, 50).forEach((item, idx) => {
     const pct = mx > 0 ? (item.count / mx) * 100 : 0;
     const name = item.nombre || item.key;
-    const subtitle = item.lineas && item.lineas.length > 0 ? item.lineas.map(l => l.linea).join(', ') : 'Sin líneas registradas';
+    const codeHint = item.nombre && item.nombre !== item.key ? item.key : '';
+    const lineasSub = item.lineas && item.lineas.length > 0
+      ? item.lineas.map(l => l.linea + ' (' + l.count + ')').join(', ')
+      : 'Sin línea en el request';
+    const subtitle = codeHint ? codeHint + ' · ' + lineasSub : lineasSub;
     
     html += '<div class="list-item">';
     html += '  <div class="list-rank">' + (idx + 1) + '</div>';
@@ -777,17 +771,13 @@ function renderLineas(items) {
   items.slice(0, 15).forEach((item, idx) => {
     const pct = mx > 0 ? (item.count / mx) * 100 : 0;
     const code = item.key;
-    const route = item.nombre || code;
-    const subtitle = item.ramales && item.ramales.length > 0 
-      ? item.ramales.map(r => r.ramal).join(' • ') 
-      : 'Consultas generales';
     
     html += '<div class="list-item">';
     html += '  <div class="list-rank">' + (idx + 1) + '</div>';
     html += '  <div class="linea-badge">' + code + '</div>';
     html += '  <div class="list-info">';
-    html += '    <div class="list-name" title="Línea ' + route + '">Línea ' + route + '</div>';
-    html += '    <div class="list-sub">' + subtitle + '</div>';
+    html += '    <div class="list-name" title="Línea ' + code + '">Línea ' + code + '</div>';
+    html += '    <div class="list-sub">consultas de arribos</div>';
     html += '    <div class="list-progress-bg"><div class="list-progress-fill blue" style="width:' + pct + '%"></div></div>';
     html += '  </div>';
     html += '  <div class="list-count">' + item.count.toLocaleString() + '</div>';
@@ -807,19 +797,28 @@ async function refresh() {
     const res = await fetch(url);
     const d = await res.json();
 
+    if (d.supabaseConnected === false) {
+      document.getElementById('s-total').textContent = '—';
+      document.getElementById('top-paradas').innerHTML = '<div class="empty-state">Supabase no configurado</div>';
+      document.getElementById('top-lineas').innerHTML = '<div class="empty-state">Supabase no configurado</div>';
+      document.getElementById('time-heatmap').innerHTML = '<div class="empty-state">Supabase no configurado</div>';
+      return;
+    }
+
     const total = d.totalEvents || 0;
     document.getElementById('s-total').textContent = total.toLocaleString();
     
-    const paradasCount = d.topParadas?.length || 0;
+    const paradasCount = d.uniqueParadas ?? d.topParadas?.length ?? 0;
     document.getElementById('s-paradas').textContent = paradasCount.toLocaleString();
     
-    const lineasCount = d.topLineas?.length || 0;
+    const lineasCount = d.uniqueLineas ?? d.topLineas?.length ?? 0;
     document.getElementById('s-lineas').textContent = lineasCount.toLocaleString();
     
     const geoCount = d.paradaGeo?.length || 0;
     document.getElementById('s-geo').textContent = geoCount + '/' + paradasCount;
     if (paradasCount > 0) {
-      document.getElementById('s-geo-label').textContent = Math.round((geoCount / paradasCount) * 100) + '% de paradas ubicadas en el mapa';
+      const pct = d.geoCoverage ?? Math.round((geoCount / paradasCount) * 100);
+      document.getElementById('s-geo-label').textContent = pct + '% de paradas ubicadas en el mapa';
     }
 
     updateMap(d.paradaGeo);
