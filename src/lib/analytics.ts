@@ -108,6 +108,32 @@ export type ParadaGeoPoint = {
     ramales?: string[];
 };
 
+async function fetchAllEvents(days: number, lineaFilter: string | undefined, selectStr: string) {
+    if (!supabase) return [];
+    let allData: any[] = [];
+    let from = 0;
+    const step = 1000;
+    
+    while (true) {
+        let q = supabase.from("query_events").select(selectStr).range(from, from + step - 1);
+        if (days > 0) {
+            const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+            q = q.gte("ts", cutoff);
+        }
+        if (lineaFilter) {
+            q = q.eq("linea", lineaFilter);
+        }
+        
+        const { data, error } = await q;
+        if (error || !data || data.length === 0) break;
+        
+        allData = allData.concat(data);
+        if (data.length < step) break;
+        from += step;
+    }
+    return allData;
+}
+
 /**
  * Top N paradas más consultadas.
  * @param days - filtrar últimos N días (0 = todo)
@@ -116,25 +142,12 @@ export async function getTopParadas(limit = 20, days = 0, lineaFilter?: string):
     if (!supabase) return [];
 
     try {
-        let q = supabase
-            .from("query_events")
-            .select("codigo_parada, linea")
-            .not("codigo_parada", "is", null);
-
-        if (days > 0) {
-            const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
-            q = q.gte("ts", cutoff);
-        }
-
-        if (lineaFilter) {
-            q = q.eq("linea", lineaFilter);
-        }
-
-        const { data, error } = await q.limit(50_000);
-        if (error || !data) return [];
+        const data = await fetchAllEvents(days, lineaFilter, "codigo_parada, linea");
+        if (!data) return [];
 
         const counts = new Map<string, { count: number; lineas: Map<string, number> }>();
         for (const row of data) {
+            if (!row.codigo_parada) continue;
             const k = row.codigo_parada as string;
             const l = row.linea as string | null;
             if (!counts.has(k)) {
@@ -170,22 +183,8 @@ export async function getTopParadas(limit = 20, days = 0, lineaFilter?: string):
 export async function getTopLineas(limit = 20, days = 0, lineaFilter?: string): Promise<TopItem[]> {
     if (!supabase) return [];
 
-    let q = supabase
-        .from("query_events")
-        .select("linea, codigo_parada")
-        .not("linea", "is", null);
-
-    if (days > 0) {
-        const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
-        q = q.gte("ts", cutoff);
-    }
-
-    if (lineaFilter) {
-        q = q.eq("linea", lineaFilter);
-    }
-
-    const { data, error } = await q.limit(10_000);
-    if (error || !data) return [];
+    const data = await fetchAllEvents(days, lineaFilter, "linea, codigo_parada");
+    if (!data) return [];
 
     // Lazy load ramales si no se hizo aún
     if (!ramalesMap) {
@@ -219,6 +218,7 @@ export async function getTopLineas(limit = 20, days = 0, lineaFilter?: string): 
 
     const counts = new Map<string, { count: number, ramales: Map<string, number> }>();
     for (const row of data) {
+        if (!row.linea) continue;
         const lineaStr = row.linea as string;
         const parada = row.codigo_parada as string | null;
         
@@ -262,20 +262,8 @@ export async function getTopLineas(limit = 20, days = 0, lineaFilter?: string): 
 export async function getHeatmapData(days = 30, lineaFilter?: string): Promise<HeatmapCell[]> {
     if (!supabase) return [];
 
-    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
-
-    let q = supabase
-        .from("query_events")
-        .select("ts")
-        .gte("ts", cutoff);
-
-    if (lineaFilter) {
-        q = q.eq("linea", lineaFilter);
-    }
-
-    const { data, error } = await q.limit(50_000);
-
-    if (error || !data) return [];
+    const data = await fetchAllEvents(days, lineaFilter, "ts");
+    if (!data) return [];
 
     // Aggregate client-side into hour × dow matrix
     const matrix = new Map<string, number>();
@@ -406,9 +394,9 @@ export async function upsertParadaGeo(
  */
 export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string) {
     const [topParadas, topLineas, heatmap, paradaGeo] = await Promise.all([
-        getTopParadas(20, days, lineaFilter),
-        getTopLineas(20, days, lineaFilter),
-        getHeatmapData(days || 30, lineaFilter),
+        getTopParadas(10000, days, lineaFilter),
+        getTopLineas(1000, days, lineaFilter),
+        getHeatmapData(days, lineaFilter),
         getParadaGeoData(days, lineaFilter),
     ]);
 
@@ -416,6 +404,10 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string) {
     let totalEvents = 0;
     if (supabase) {
         let q = supabase.from("query_events").select("*", { count: "exact", head: true });
+        if (days > 0) {
+            const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+            q = q.gte("ts", cutoff);
+        }
         if (lineaFilter) {
             q = q.eq("linea", lineaFilter);
         }

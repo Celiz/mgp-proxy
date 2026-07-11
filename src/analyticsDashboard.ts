@@ -534,7 +534,7 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
   <div class="card col-span-4 scrollable-card">
     <div class="card-title-main" style="position: sticky; top: 0; background: var(--card-bg); z-index: 5; padding-bottom: 8px;">
       <span style="color:var(--text-dim)">📍</span> Paradas más consultadas
-      <span class="subtitle" id="top-paradas-count">— consultas</span>
+      <span class="subtitle" id="top-paradas-count">Top 50</span>
     </div>
     <div id="top-paradas" class="list-container loading">Cargando...</div>
   </div>
@@ -543,7 +543,7 @@ export const analyticsDashboardHtml = /* html */ `<!DOCTYPE html>
   <div class="card col-span-12">
     <div class="card-title-main">
       <span style="color:var(--text-dim)">🚌</span> Líneas más consultadas
-      <span class="subtitle" id="top-lineas-count">— consultas</span>
+      <span class="subtitle" id="top-lineas-count">Top 15</span>
     </div>
     <!-- Note the grid-3-list class below handles the 3 column layout -->
     <div id="top-lineas" class="grid-3-list loading">Cargando...</div>
@@ -627,6 +627,11 @@ function updateMap(paradaGeo) {
     const bounds = L.latLngBounds(paradaGeo.map(p => [p.lat, p.lng]));
     map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
   }
+  
+  // Fix for the grey tiles bug in Flex/Grid layouts
+  setTimeout(() => {
+    map.invalidateSize();
+  }, 100);
 }
 
 // ── Time Heatmap ───────────────────────────────────────────
@@ -680,7 +685,8 @@ function renderTimeHeatmap(cells) {
     html += '<div class="heatmap-label right">' + DAYS[d] + '</div>';
     for (let h = 0; h < 24; h++) {
       const count = matrix[d + ':' + h] || 0;
-      const intensity = maxVal > 0 ? count / maxVal : 0;
+      // Usar escala logarítmica para que los outliers (pruebas masivas) no oculten el tráfico normal
+      const intensity = maxVal > 0 && count > 0 ? Math.log(count + 1) / Math.log(maxVal + 1) : 0;
       const bg = intensityColor(intensity);
       html += '<div class="heatmap-cell" style="background:' + bg + '" ' +
         'data-hour="' + h + '" data-dow="' + d + '" data-count="' + count + '"></div>';
@@ -773,7 +779,7 @@ function renderLineas(items) {
     const code = item.key;
     const route = item.nombre || code;
     const subtitle = item.ramales && item.ramales.length > 0 
-      ? item.ramales.map(r => r.ramal + ' (' + r.count + ')').join(' • ') 
+      ? item.ramales.map(r => r.ramal).join(' • ') 
       : 'Consultas generales';
     
     html += '<div class="list-item">';
@@ -815,9 +821,6 @@ async function refresh() {
     if (paradasCount > 0) {
       document.getElementById('s-geo-label').textContent = Math.round((geoCount / paradasCount) * 100) + '% de paradas ubicadas en el mapa';
     }
-
-    document.getElementById('top-paradas-count').textContent = (total || 0).toLocaleString() + ' consultas';
-    document.getElementById('top-lineas-count').textContent = (total || 0).toLocaleString() + ' consultas';
 
     updateMap(d.paradaGeo);
     renderTimeHeatmap(d.heatmap);
