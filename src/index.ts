@@ -6,7 +6,7 @@ import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import { enqueueMgp, getMgpQueueStats } from "./lib/mgpQueue.js";
-import { trackQuery } from "./lib/analytics.js";
+import { hashClient, trackQuery } from "./lib/analytics.js";
 import {
     recordAccion,
     recordCache,
@@ -146,8 +146,59 @@ function getTtls(accion: string): { fresh: number; stale: number } {
     return { fresh: 15_000, stale: 60_000 };
 }
 
+// 4. Proxy helpers — analytics de producto
+function clientHashFrom(c: import("hono").Context): string | null {
+    const explicit =
+        c.req.header("x-client-id") ??
+        c.req.header("x-device-id") ??
+        c.req.query("clientId") ??
+        null;
+    const ip = c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+    const ua = c.req.header("user-agent");
+    return hashClient([explicit, ip, ua]);
+}
+
+function extractRamal(params: URLSearchParams | Record<string, string>): string | null {
+    const get = (k: string) =>
+        params instanceof URLSearchParams ? params.get(k) : (params[k] ?? null);
+    return (
+        get("AbreviaturaBandera") ??
+        get("abreviaturaBandera") ??
+        get("IdentificadorBandera") ??
+        get("identificadorBandera") ??
+        get("Bandera") ??
+        get("bandera") ??
+        get("ramal") ??
+        get("Ramal") ??
+        null
+    );
+}
+
+function trackProxyEvent(
+    c: import("hono").Context,
+    opts: {
+        accion: string;
+        parada?: string | null;
+        linea?: string | null;
+        ramal?: string | null;
+        cache: "HIT" | "MISS" | "STALE" | "UNKNOWN";
+        startedAt: number;
+    },
+): void {
+    trackQuery({
+        accion: opts.accion,
+        codigoParada: opts.parada,
+        linea: opts.linea,
+        ramal: opts.ramal,
+        clientHash: clientHashFrom(c),
+        cache: opts.cache,
+        durationMs: Math.round(performance.now() - opts.startedAt),
+    });
+}
+
 // 4. Proxy Endpoints
 app.post("/", async (c) => {
+    const startedAt = performance.now();
     const body = await readProxyBody(c);
     if (body === null) {
         return c.json({ error: "unsupported_content_type", got: c.req.header("content-type") }, 415);
@@ -163,14 +214,13 @@ app.post("/", async (c) => {
     recordAccion(accion);
     const parada = bodyParams.get("CodigoParada") ?? bodyParams.get("codigoParada") ?? bodyParams.get("parada") ?? bodyParams.get("identificadorParada");
     if (parada) recordParada(parada);
-    // Preferir código de línea MGP (mapeable a nombre) antes que campos ambiguos
     let linea = bodyParams.get("CodigoLineaParada") ?? bodyParams.get("codigoLineaParada") ?? bodyParams.get("CodigoLinea") ?? bodyParams.get("Linea") ?? bodyParams.get("linea");
     if (linea && lineaMap.has(linea)) linea = lineaMap.get(linea) as string;
-    // Analytics de producto: solo arribos (trackQuery filtra por acción)
-    trackQuery(accion, parada, linea);
+    const ramal = extractRamal(bodyParams);
 
     if (cached && now - cached.at < freshTtl) {
         recordCache("HIT");
+        trackProxyEvent(c, { accion, parada, linea, ramal, cache: "HIT", startedAt });
         c.header("X-Cache", "HIT");
         return c.json(cached.payload as Record<string, unknown>);
     }
@@ -179,22 +229,26 @@ app.post("/", async (c) => {
         const data = await enqueueMgp(body, { priority: "high" });
         proxyCacheSet(key, { at: now, payload: data, status: 200 });
         recordCache("MISS");
+        trackProxyEvent(c, { accion, parada, linea, ramal, cache: "MISS", startedAt });
         c.header("X-Cache", "MISS");
         return c.json(data as Record<string, unknown>);
     } catch (e) {
         const message = (e as Error).message;
         if (cached && now - cached.at < staleTtl) {
             recordCache("STALE");
+            trackProxyEvent(c, { accion, parada, linea, ramal, cache: "STALE", startedAt });
             c.header("X-Cache", "STALE");
             c.header("X-Stale-Reason", message.slice(0, 120));
             return c.json(cached.payload as Record<string, unknown>);
         }
         recordError("POST /", 502, message);
+        trackProxyEvent(c, { accion, parada, linea, ramal, cache: "UNKNOWN", startedAt });
         return c.json({ error: "mgp_unavailable", message }, 502);
     }
 });
 
 app.get("/mgp/:accion", async (c) => {
+    const startedAt = performance.now();
     const accion = c.req.param("accion");
     const params: Record<string, string> = {};
     for (const [k, v] of new URL(c.req.url).searchParams.entries()) {
@@ -213,12 +267,13 @@ app.get("/mgp/:accion", async (c) => {
     if (parada) recordParada(parada);
     let linea = params["CodigoLineaParada"] ?? params["codigoLineaParada"] ?? params["CodigoLinea"] ?? params["Linea"] ?? params["linea"];
     if (linea && lineaMap.has(linea)) linea = lineaMap.get(linea) as string;
-    trackQuery(accion, parada, linea);
+    const ramal = extractRamal(params);
 
     c.header("Access-Control-Allow-Origin", "*");
 
     if (cached && now - cached.at < freshTtl) {
         recordCache("HIT");
+        trackProxyEvent(c, { accion, parada, linea, ramal, cache: "HIT", startedAt });
         c.header("X-Cache", "HIT");
         c.header("Cache-Control", `public, max-age=${browserMaxAge}, s-maxage=${sMaxAge}`);
         return c.json(cached.payload as Record<string, unknown>);
@@ -228,6 +283,7 @@ app.get("/mgp/:accion", async (c) => {
         const data = await enqueueMgp(body, { priority: "high" });
         proxyCacheSet(key, { at: now, payload: data, status: 200 });
         recordCache("MISS");
+        trackProxyEvent(c, { accion, parada, linea, ramal, cache: "MISS", startedAt });
         c.header("X-Cache", "MISS");
         c.header("Cache-Control", `public, max-age=${browserMaxAge}, s-maxage=${sMaxAge}`);
         return c.json(data as Record<string, unknown>);
@@ -235,12 +291,14 @@ app.get("/mgp/:accion", async (c) => {
         const message = (e as Error).message;
         if (cached && now - cached.at < staleTtl) {
             recordCache("STALE");
+            trackProxyEvent(c, { accion, parada, linea, ramal, cache: "STALE", startedAt });
             c.header("X-Cache", "STALE");
             c.header("X-Stale-Reason", message.slice(0, 120));
             c.header("Cache-Control", `public, max-age=${browserMaxAge}, s-maxage=${sMaxAge}`);
             return c.json(cached.payload as Record<string, unknown>);
         }
         recordError(`GET /mgp/${accion}`, 502, message);
+        trackProxyEvent(c, { accion, parada, linea, ramal, cache: "UNKNOWN", startedAt });
         return c.json({ error: "mgp_unavailable", message }, 502);
     }
 });

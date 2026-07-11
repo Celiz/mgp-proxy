@@ -1,12 +1,104 @@
 {
   "BOOT_AT": 1783612190349,
-  "requests": [],
-  "errors": [],
+  "requests": [
+    {
+      "at": 1783806203923,
+      "method": "GET",
+      "path": "/",
+      "status": 404,
+      "durationMs": 3,
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    },
+    {
+      "at": 1783806204600,
+      "method": "GET",
+      "path": "/",
+      "status": 404,
+      "durationMs": 0,
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    },
+    {
+      "at": 1783806204696,
+      "method": "GET",
+      "path": "/favicon.ico",
+      "status": 404,
+      "durationMs": 0,
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    },
+    {
+      "at": 1783807590224,
+      "method": "GET",
+      "path": "/",
+      "status": 404,
+      "durationMs": 2,
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    },
+    {
+      "at": 1783807590502,
+      "method": "GET",
+      "path": "/",
+      "status": 404,
+      "durationMs": 0,
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    }
+  ],
+  "errors": [
+    {
+      "at": 1783806203923,
+      "path": "GET /",
+      "status": 404,
+      "message": ""
+    },
+    {
+      "at": 1783806204600,
+      "path": "GET /",
+      "status": 404,
+      "message": ""
+    },
+    {
+      "at": 1783806204696,
+      "path": "GET /favicon.ico",
+      "status": 404,
+      "message": ""
+    },
+    {
+      "at": 1783807590224,
+      "path": "GET /",
+      "status": 404,
+      "message": ""
+    },
+    {
+      "at": 1783807590502,
+      "path": "GET /",
+      "status": 404,
+      "message": ""
+    }
+  ],
   "mgpCalls": [],
+  "durations": [
+    2,
+    0
+  ],
+  "mgpErrorMessages": [],
+  "breakerOpenAccumMs": 0,
   "counts": {
-    "requestsTotal": 0,
-    "byStatus": [],
-    "byPath": [],
+    "requestsTotal": 5,
+    "byStatus": [
+      [
+        404,
+        5
+      ]
+    ],
+    "byPath": [
+      [
+        "GET /",
+        4
+      ],
+      [
+        "GET /favicon.ico",
+        1
+      ]
+    ],
     "byAccion": [],
     "byParada": [],
     "cacheHit": 0,

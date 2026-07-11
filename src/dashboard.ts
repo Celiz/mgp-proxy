@@ -430,6 +430,11 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
   <!-- Row 1: Key metrics -->
   <div class="grid" id="top-cards">
     <div class="card">
+      <div class="card-title"><span class="icon">❤️</span> Health score</div>
+      <div class="big-number" id="m-health">—</div>
+      <div class="big-label" id="m-health-label">—</div>
+    </div>
+    <div class="card">
       <div class="card-title"><span class="icon">📊</span> Total requests</div>
       <div class="big-number" id="m-total">—</div>
       <div class="big-label" id="m-rps">— req/min últimos 60s</div>
@@ -444,10 +449,23 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
       <div id="m-breaker">—</div>
       <div class="big-label" id="m-breaker-info">—</div>
     </div>
+  </div>
+
+  <!-- Row 1b: Latency + memory -->
+  <div class="grid grid-2" style="margin-top:0">
     <div class="card">
-      <div class="card-title"><span class="icon">💾</span> Memoria</div>
+      <div class="card-title"><span class="icon">⏱️</span> Latencia (proxy)</div>
+      <div class="stat-row"><span class="stat-key">p50</span><span class="stat-val" id="lat-p50">—</span></div>
+      <div class="stat-row"><span class="stat-key">p95</span><span class="stat-val" id="lat-p95">—</span></div>
+      <div class="stat-row"><span class="stat-key">p99</span><span class="stat-val" id="lat-p99">—</span></div>
+      <div class="stat-row"><span class="stat-key">muestras</span><span class="stat-val" id="lat-n">—</span></div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="icon">💾</span> Memoria + stale</div>
       <div class="big-number color-cyan" id="m-mem">—</div>
       <div class="big-label" id="m-mem-detail">—</div>
+      <div class="stat-row" style="margin-top:12px"><span class="stat-key">Cache stale rate</span><span class="stat-val" id="m-stale-rate">—</span></div>
+      <div class="stat-row"><span class="stat-key">Breaker open acum.</span><span class="stat-val" id="m-breaker-ms">—</span></div>
     </div>
   </div>
 
@@ -490,11 +508,17 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
     <div class="bar-chart" id="top-paradas"></div>
   </div>
 
-  <!-- Row 4: Errors -->
-  <div class="card" style="margin-bottom:24px">
-    <div class="card-title"><span class="icon">🚨</span> Últimos errores</div>
-    <div class="error-list" id="error-list">
-      <div class="empty-state">Sin errores 🎉</div>
+  <!-- Row 4: Top MGP errors + recent errors -->
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title"><span class="icon">🧨</span> Top errores MGP (agrupados)</div>
+      <div class="bar-chart" id="top-mgp-errors"></div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="icon">🚨</span> Últimos errores</div>
+      <div class="error-list" id="error-list">
+        <div class="empty-state">Sin errores 🎉</div>
+      </div>
     </div>
   </div>
 
@@ -635,13 +659,20 @@ async function refresh() {
     document.getElementById('uptime').textContent = '⏱ ' + formatUptime(d.uptimeSec);
     document.getElementById('refreshed').textContent = 'actualizado ' + new Date().toLocaleTimeString('es-AR', { hour12: false });
 
+    // Health
+    const hs = d.health || { score: '—', label: '—' };
+    const healthEl = document.getElementById('m-health');
+    healthEl.textContent = hs.score;
+    healthEl.className = 'big-number ' + (hs.score >= 85 ? 'color-green' : hs.score >= 50 ? '' : 'color-red');
+    document.getElementById('m-health-label').textContent = hs.label + (hs.factors ? ' · ' + Object.entries(hs.factors).filter(([,v]) => v).map(([k,v]) => k + v).join(' ') : '');
+
     // Top cards
     document.getElementById('m-total').textContent = d.requests.total.toLocaleString();
     document.getElementById('m-rps').textContent = d.requests.last1m.count + ' req · ' + d.requests.last1m.errors + ' err (último 1m)';
 
     document.getElementById('m-mgp-ok').textContent = d.mgp.ok.toLocaleString();
     const mgpErrTotal = d.mgp.rateLimited + d.mgp.otherErrors;
-    document.getElementById('m-mgp-err').textContent = mgpErrTotal + ' errores · último ok ' + fmtTimeAgo(d.mgp.lastSuccessAt);
+    document.getElementById('m-mgp-err').textContent = mgpErrTotal + ' errores · ok ' + (d.mgp.okRate != null ? d.mgp.okRate + '%' : '—') + ' · último ok ' + fmtTimeAgo(d.mgp.lastSuccessAt);
 
     // Breaker
     const bState = d.queue.breakerState;
@@ -656,11 +687,20 @@ async function refresh() {
       : 'errores consec: ' + d.queue.consecutiveErrors + ' · backoff: x' + d.queue.backoffMultiplier;
     document.getElementById('m-breaker-info').textContent = bInfo;
 
-    // Memory
+    // Latency
+    document.getElementById('lat-p50').textContent = d.latency?.p50 != null ? d.latency.p50 + ' ms' : '—';
+    document.getElementById('lat-p95').textContent = d.latency?.p95 != null ? d.latency.p95 + ' ms' : '—';
+    document.getElementById('lat-p99').textContent = d.latency?.p99 != null ? d.latency.p99 + ' ms' : '—';
+    document.getElementById('lat-n').textContent = (d.latency?.samples || 0).toLocaleString();
+
+    // Memory + stale
     const rss = d.memory.rss || 0;
     const heap = d.memory.heapUsed || 0;
     document.getElementById('m-mem').textContent = fmtBytes(rss);
     document.getElementById('m-mem-detail').textContent = 'heap: ' + fmtBytes(heap) + ' / ' + fmtBytes(d.memory.heapTotal || 0);
+    document.getElementById('m-stale-rate').textContent = d.cache.staleRate != null ? d.cache.staleRate + '%' : '—';
+    const openMs = d.breaker?.openAccumMs || 0;
+    document.getElementById('m-breaker-ms').textContent = openMs > 0 ? Math.round(openMs/1000) + 's' : '0s';
 
     // Cache ring
     renderCacheRing(d.cache.hit, d.cache.miss, d.cache.stale);
@@ -678,6 +718,7 @@ async function refresh() {
     renderBars('top-acciones', d.requests.topAcciones);
     renderBars('top-paths', d.requests.topPaths);
     renderBars('top-paradas', d.requests.topParadas);
+    renderBars('top-mgp-errors', d.mgp.topErrors || []);
 
     // Errors
     renderErrors(d.errors);

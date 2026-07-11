@@ -12,7 +12,7 @@
  */
 
 import { fetchMgpDirect, isMgpDirectEnabled } from "./mgpDirect.js";
-import { recordMgp } from "../stats.js";
+import { recordBreakerState, recordMgp } from "../stats.js";
 
 // ---------------------------------------------------------------------------
 // Configuración
@@ -90,6 +90,7 @@ function openBreaker(reason: string): void {
     const duration = Math.min(BREAKER_BASE_MS * breakerBackoffMultiplier, BREAKER_MAX_MS);
     breakerOpenUntil = Date.now() + duration;
     breakerState = "open";
+    recordBreakerState("open");
     breakerBackoffMultiplier = Math.min(breakerBackoffMultiplier * 2, BREAKER_MAX_MS / BREAKER_BASE_MS);
     console.warn(
         `[mgpQueue] circuit breaker OPEN por ${Math.round(duration / 1000)}s — razón: ${reason}`,
@@ -100,6 +101,7 @@ function checkBreaker(): void {
     if (breakerState === "closed") return;
     if (breakerState === "open" && Date.now() >= breakerOpenUntil) {
         breakerState = "half-open";
+        recordBreakerState("half-open");
         halfOpenProbeInFlight = false;
         console.log("[mgpQueue] circuit breaker → HALF-OPEN (probando 1 request)");
     }
@@ -109,6 +111,7 @@ function onSuccess(): void {
     consecutiveErrors = 0;
     if (breakerState === "half-open") {
         breakerState = "closed";
+        recordBreakerState("closed");
         breakerBackoffMultiplier = 1;
         halfOpenProbeInFlight = false;
         console.log("[mgpQueue] circuit breaker → CLOSED (probe exitosa)");
