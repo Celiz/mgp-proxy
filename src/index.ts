@@ -6,6 +6,7 @@ import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import { enqueueMgp, getMgpQueueStats } from "./lib/mgpQueue.js";
+import { cargarClearanceDeDisco, esRespuestaOk, getClearanceInfo, setClearance } from "./lib/mgpWeb.js";
 import { hashClient, trackQuery } from "./lib/analytics.js";
 import {
     recordAccion,
@@ -37,11 +38,18 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // 1. Minimal environment for proxy-only mode (No DB required)
+//
+// El transporte por defecto es el WS web (cf_clearance vía navegador), que no
+// usa las llaves de la app V670: sólo se exigen si se vuelve a ese camino con
+// MGP_TRANSPORT=v670.
 const envSchema = z.object({
     PORT: z.coerce.number().int().positive().default(4000),
     HOST: z.string().default("0.0.0.0"),
-    MGP_RSA_PUBKEY: z.string().min(1, "Falta la llave pública de MGP"),
-    MGP_SHARED_KEY: z.string().min(1, "Falta la llave compartida de MGP"),
+    MGP_TRANSPORT: z.enum(["web", "v670"]).default("web"),
+    MGP_RSA_PUBKEY: z.string().optional(),
+    MGP_SHARED_KEY: z.string().optional(),
+    /** Token para inyectar clearance desde otra máquina de la misma red. */
+    ADMIN_TOKEN: z.string().optional(),
     ALLOWED_ORIGINS: z
         .string()
         .optional()
@@ -57,6 +65,11 @@ if (!envParsed.success) {
     process.exit(1);
 }
 const env = envParsed.data;
+
+if (env.MGP_TRANSPORT === "v670" && !(env.MGP_RSA_PUBKEY && env.MGP_SHARED_KEY)) {
+    console.error("❌ MGP_TRANSPORT=v670 necesita MGP_RSA_PUBKEY y MGP_SHARED_KEY.");
+    process.exit(1);
+}
 
 // 2. Setup Hono App
 const app = new Hono();
@@ -132,10 +145,23 @@ async function readProxyBody(c: import("hono").Context): Promise<string | null> 
     return null;
 }
 
+/**
+ * Acciones cuyo resultado casi no cambia (catálogo de líneas, calles, paradas,
+ * recorridos). Incluye los nombres del WS web — que es lo que habla el
+ * frontend — y los viejos del V670, para no romper clientes que sigan usándolos.
+ */
 const SEMI_STATIC_ACCIONES = new Set([
+    // WS web (app_cuando_llega/webWS.php)
+    "RecuperarLineaPorCuandoLlega",
+    "RecuperarCallesPrincipalPorLinea",
+    "RecuperarInterseccionPorLineaYCalle",
+    "RecuperarParadasConBanderaPorLineaCalleEInterseccion",
+    "RecuperarParadasConBanderaYDestinoPorLinea",
+    "RecuperarRecorridoParaMapaAbrevYAmpliPorEntidadYLinea",
+    "RecuperarBanderasAsociadasAParada",
+    // V670 (appWS.php)
     "RecuperarLineasW",
     "RecuperarBanderasW",
-    "RecuperarBanderasAsociadasAParada",
     "RecuperarParadasBanderasW",
 ]);
 
@@ -232,7 +258,9 @@ app.post("/", async (c) => {
 
     try {
         const data = await enqueueMgp(body, { priority: "high" });
-        proxyCacheSet(key, { at: now, payload: data, status: 200 });
+        // Los errores de negocio del WS (CodigoEstado != 0) se le pasan al
+        // cliente tal cual, pero no se cachean.
+        if (esRespuestaOk(data)) proxyCacheSet(key, { at: now, payload: data, status: 200 });
         recordCache("MISS");
         trackProxyEvent(c, { accion, parada, linea, ramal, cache: "MISS", startedAt });
         c.header("X-Cache", "MISS");
@@ -286,7 +314,7 @@ app.get("/mgp/:accion", async (c) => {
 
     try {
         const data = await enqueueMgp(body, { priority: "high" });
-        proxyCacheSet(key, { at: now, payload: data, status: 200 });
+        if (esRespuestaOk(data)) proxyCacheSet(key, { at: now, payload: data, status: 200 });
         recordCache("MISS");
         trackProxyEvent(c, { accion, parada, linea, ramal, cache: "MISS", startedAt });
         c.header("X-Cache", "MISS");
@@ -314,7 +342,40 @@ app.get("/stats", (c) => {
 });
 
 app.get("/stats/data", (c) => {
-    return c.json({ ...snapshot(), queue: getMgpQueueStats() });
+    return c.json({ ...snapshot(), queue: getMgpQueueStats(), clearance: getClearanceInfo() });
+});
+
+// 5c. Clearance remoto
+//
+// El challenge de Cloudflare sólo lo resuelve un navegador con display, y la
+// cookie queda atada a la IP pública, no al equipo. Así, una máquina de la misma
+// red (por ejemplo la PC de casa) puede resolverlo y acercárselo al proxy, que
+// puede seguir corriendo en un lugar sin navegador — Termux, por caso.
+// Ver `src/scripts/obtenerClearance.ts`.
+app.post("/admin/clearance", async (c) => {
+    if (!env.ADMIN_TOKEN) {
+        return c.json({ error: "admin_deshabilitado", message: "Definí ADMIN_TOKEN para usar este endpoint" }, 403);
+    }
+    if (c.req.header("x-admin-token") !== env.ADMIN_TOKEN) {
+        return c.json({ error: "unauthorized" }, 401);
+    }
+    const payload = await c.req.json().catch(() => null);
+    const parsed = z
+        .object({
+            cookies: z.array(z.object({ name: z.string(), value: z.string() })).min(1),
+            ua: z.string().min(1),
+            at: z.number().optional(),
+            expiraEn: z.number().optional(),
+        })
+        .safeParse(payload);
+    if (!parsed.success) {
+        return c.json({ error: "payload_invalido", issues: parsed.error.issues }, 400);
+    }
+    if (!parsed.data.cookies.some((k) => k.name === "cf_clearance")) {
+        return c.json({ error: "sin_cf_clearance", message: "El payload no trae la cookie cf_clearance" }, 400);
+    }
+    setClearance(parsed.data);
+    return c.json({ ok: true, clearance: getClearanceInfo() });
 });
 
 // 5b. Analytics Dashboard (persistent data)
@@ -333,6 +394,7 @@ app.get("/stats/analytics/data", async (c) => {
 // 6. Start Server
 async function start() {
     await loadStats();
+    if (env.MGP_TRANSPORT === "web") cargarClearanceDeDisco();
     
     // Guardar periódicamente cada 1 minuto
     setInterval(saveStats, 60_000);

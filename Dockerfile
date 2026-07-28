@@ -1,21 +1,22 @@
-# Usa la imagen oficial de Node.js (liviana)
-FROM node:20-alpine
+# Debian y no Alpine: hace falta Chromium para resolver el challenge de
+# Cloudflare, y xvfb para darle un display — headless no lo pasa.
+FROM node:22-bookworm-slim
 
-# Establece el directorio de trabajo
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        chromium xvfb ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copia los archivos de configuración
 COPY package.json package-lock.json* ./
-
-# Instala las dependencias
 RUN npm install
 
-# Copia el resto del código
 COPY src ./src
 
-# La aplicación escucha en el puerto 4000 por defecto
 ENV PORT=4000
+ENV MGP_BROWSER_PATH=/usr/bin/chromium
 EXPOSE 4000
 
-# Comando para ejecutar el proxy usando Node
-CMD ["npm", "start"]
+# xvfb-run le da el display virtual que el challenge necesita. El navegador se
+# abre una sola vez (la cookie dura un año), así que no pesa en el día a día.
+CMD ["xvfb-run", "-a", "npm", "start"]

@@ -40,6 +40,86 @@
       "status": 404,
       "durationMs": 0,
       "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    },
+    {
+      "at": 1785281570611,
+      "method": "POST",
+      "path": "/",
+      "status": 200,
+      "durationMs": 14170,
+      "ua": "curl/8.14.1"
+    },
+    {
+      "at": 1785281572016,
+      "method": "POST",
+      "path": "/",
+      "status": 200,
+      "durationMs": 1,
+      "ua": "curl/8.14.1"
+    },
+    {
+      "at": 1785281573069,
+      "method": "GET",
+      "path": "/mgp/RecuperarLineaPorCuandoLlega",
+      "status": 200,
+      "durationMs": 373,
+      "ua": "curl/8.14.1"
+    },
+    {
+      "at": 1785281574558,
+      "method": "GET",
+      "path": "/mgp/RecuperarRecorridoParaMapaAbrevYAmpliPorEntidadYLinea",
+      "status": 200,
+      "durationMs": 536,
+      "ua": "curl/8.14.1"
+    },
+    {
+      "at": 1785281596202,
+      "method": "POST",
+      "path": "/admin/clearance",
+      "status": 401,
+      "durationMs": 0,
+      "ua": "curl/8.14.1"
+    },
+    {
+      "at": 1785281596781,
+      "method": "POST",
+      "path": "/admin/clearance",
+      "status": 400,
+      "durationMs": 5,
+      "ua": "curl/8.14.1"
+    },
+    {
+      "at": 1785281629231,
+      "method": "POST",
+      "path": "/admin/clearance",
+      "status": 200,
+      "durationMs": 237,
+      "ua": "curl/8.14.1"
+    },
+    {
+      "at": 1785281714226,
+      "method": "POST",
+      "path": "/",
+      "status": 200,
+      "durationMs": 84642,
+      "ua": "curl/8.14.1"
+    },
+    {
+      "at": 1785281823859,
+      "method": "POST",
+      "path": "/admin/clearance",
+      "status": 200,
+      "durationMs": 5,
+      "ua": "node"
+    },
+    {
+      "at": 1785282141983,
+      "method": "POST",
+      "path": "/",
+      "status": 200,
+      "durationMs": 11193,
+      "ua": "curl/8.14.1"
     }
   ],
   "errors": [
@@ -72,21 +152,81 @@
       "path": "GET /",
       "status": 404,
       "message": ""
+    },
+    {
+      "at": 1785281596202,
+      "path": "POST /admin/clearance",
+      "status": 401,
+      "message": ""
+    },
+    {
+      "at": 1785281596781,
+      "path": "POST /admin/clearance",
+      "status": 400,
+      "message": ""
     }
   ],
-  "mgpCalls": [],
+  "mgpCalls": [
+    {
+      "at": 1785281569965,
+      "ok": true,
+      "status": 200
+    },
+    {
+      "at": 1785281573069,
+      "ok": true,
+      "status": 200
+    },
+    {
+      "at": 1785281574557,
+      "ok": true,
+      "status": 200
+    },
+    {
+      "at": 1785281714226,
+      "ok": true,
+      "status": 200
+    },
+    {
+      "at": 1785282141812,
+      "ok": true,
+      "status": 200
+    }
+  ],
   "durations": [
     2,
-    0
+    0,
+    14170,
+    1,
+    373,
+    536,
+    0,
+    5,
+    237,
+    84642,
+    5,
+    11193
   ],
   "mgpErrorMessages": [],
   "breakerOpenAccumMs": 0,
   "counts": {
-    "requestsTotal": 5,
+    "requestsTotal": 15,
     "byStatus": [
       [
         404,
         5
+      ],
+      [
+        200,
+        8
+      ],
+      [
+        401,
+        1
+      ],
+      [
+        400,
+        1
       ]
     ],
     "byPath": [
@@ -97,15 +237,53 @@
       [
         "GET /favicon.ico",
         1
+      ],
+      [
+        "POST /",
+        4
+      ],
+      [
+        "GET /mgp/RecuperarLineaPorCuandoLlega",
+        1
+      ],
+      [
+        "GET /mgp/RecuperarRecorridoParaMapaAbrevYAmpliPorEntidadYLinea",
+        1
+      ],
+      [
+        "POST /admin/clearance",
+        4
       ]
     ],
-    "byAccion": [],
-    "byParada": [],
-    "cacheHit": 0,
-    "cacheMiss": 0,
+    "byAccion": [
+      [
+        "RecuperarProximosArribosW",
+        3
+      ],
+      [
+        "RecuperarLineaPorCuandoLlega",
+        1
+      ],
+      [
+        "RecuperarRecorridoParaMapaAbrevYAmpliPorEntidadYLinea",
+        1
+      ],
+      [
+        "RecuperarBanderasAsociadasAParada",
+        1
+      ]
+    ],
+    "byParada": [
+      [
+        "P3608",
+        4
+      ]
+    ],
+    "cacheHit": 1,
+    "cacheMiss": 5,
     "cacheStale": 0,
-    "mgpTotal": 0,
-    "mgpOk": 0,
+    "mgpTotal": 5,
+    "mgpOk": 5,
     "mgp429": 0,
     "mgpOtherErr": 0
   }

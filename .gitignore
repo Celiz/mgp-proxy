@@ -4,3 +4,7 @@ dist/
 .env.*
 !.env.example
 .DS_Store
+
+# Cookies de sesión de MGP (cf_clearance + PHPSESSID) y perfil del navegador
+src/data/clearance.json
+.browser-profile/
