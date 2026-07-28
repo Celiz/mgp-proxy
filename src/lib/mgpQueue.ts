@@ -26,9 +26,17 @@ const RATE_LIMIT_BURST = 4;
 const TOKEN_WAIT_TIMEOUT_MS = 10_000;
 
 /** Duración base del circuit breaker (se escala con backoff). */
-const BREAKER_BASE_MS = 15_000;
-/** Duración máxima del circuit breaker. */
-const BREAKER_MAX_MS = 60_000;
+const BREAKER_BASE_MS = 30_000;
+/**
+ * Duración máxima del circuit breaker.
+ *
+ * Cuando MGP entra en rate limit sostenido, su ventana no se resetea sola: hay
+ * que dejar de pegarle. Medido, 7 min a 1 req/min no alcanzan para salir. Un
+ * corte corto (60s) mantiene el bloqueo vivo indefinidamente, así que el corte
+ * tiene que ser largo — y el stale de 10 min de arribos lo cubre entero, que es
+ * lo que evita que el usuario vea el corte.
+ */
+const BREAKER_MAX_MS = 5 * 60 * 1000;
 /** Errores consecutivos para abrir el breaker (sin 429 explícito). */
 const BREAKER_ERROR_THRESHOLD = 3;
 /** 429/503 consecutivos para abrir el breaker. */
