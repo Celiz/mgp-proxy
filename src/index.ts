@@ -143,7 +143,12 @@ function getTtls(accion: string): { fresh: number; stale: number } {
     if (SEMI_STATIC_ACCIONES.has(accion)) {
         return { fresh: 86_400_000, stale: 604_800_000 };
     }
-    return { fresh: 15_000, stale: 60_000 };
+    // El stale tiene que sobrevivir a la ventana del circuit breaker: si el
+    // breaker corta más tiempo del que dura el stale, no queda nada para servir
+    // y devolvemos 502 aunque tengamos el dato en memoria. Con stale de 60s
+    // contra un breaker de hasta 5 min, el 58% de las requests terminaban en
+    // error. Un arribo de hace unos minutos es mejor que un 502.
+    return { fresh: 30_000, stale: 600_000 };
 }
 
 // 4. Proxy helpers — analytics de producto

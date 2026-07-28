@@ -26,11 +26,13 @@ const RATE_LIMIT_BURST = 4;
 const TOKEN_WAIT_TIMEOUT_MS = 10_000;
 
 /** Duración base del circuit breaker (se escala con backoff). */
-const BREAKER_BASE_MS = 30_000;
+const BREAKER_BASE_MS = 15_000;
 /** Duración máxima del circuit breaker. */
-const BREAKER_MAX_MS = 5 * 60 * 1000;
+const BREAKER_MAX_MS = 60_000;
 /** Errores consecutivos para abrir el breaker (sin 429 explícito). */
 const BREAKER_ERROR_THRESHOLD = 3;
+/** 429/503 consecutivos para abrir el breaker. */
+const BREAKER_RATE_LIMIT_THRESHOLD = 3;
 
 // ---------------------------------------------------------------------------
 // Token Bucket Rate Limiter
@@ -82,6 +84,7 @@ type BreakerState = "closed" | "open" | "half-open";
 let breakerState: BreakerState = "closed";
 let breakerOpenUntil = 0;
 let consecutiveErrors = 0;
+let consecutiveRateLimits = 0;
 let breakerBackoffMultiplier = 1;
 /** Cuando está half-open, solo dejamos pasar 1 request de prueba. */
 let halfOpenProbeInFlight = false;
@@ -109,6 +112,7 @@ function checkBreaker(): void {
 
 function onSuccess(): void {
     consecutiveErrors = 0;
+    consecutiveRateLimits = 0;
     if (breakerState === "half-open") {
         breakerState = "closed";
         recordBreakerState("closed");
@@ -121,7 +125,14 @@ function onSuccess(): void {
 function onError(status: number, message: string): void {
     consecutiveErrors++;
     if (status === 429 || status === 503) {
-        openBreaker(`HTTP ${status}`);
+        consecutiveRateLimits++;
+        // Un 429 suelto es ruido normal bajo carga: MGP nos frena un instante y
+        // sigue respondiendo. Abrir el breaker por uno solo cortaba minutos de
+        // servicio por un rechazo puntual — 1.620 429s reales terminaron
+        // cortando 50.157 requests. Exigimos evidencia de saturación real.
+        if (consecutiveRateLimits >= BREAKER_RATE_LIMIT_THRESHOLD) {
+            openBreaker(`${consecutiveRateLimits} x HTTP ${status}`);
+        }
     } else if (consecutiveErrors >= BREAKER_ERROR_THRESHOLD) {
         openBreaker(`${consecutiveErrors} errores consecutivos: ${message}`);
     }

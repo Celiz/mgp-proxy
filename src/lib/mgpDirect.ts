@@ -163,6 +163,14 @@ export async function fetchMgpDirect(body: string): Promise<unknown> {
     let s = await getSession();
     let { status, text } = await callAppWS(s, body);
 
+    // 429/503 son rate limiting de MGP, no sesión vencida. Re-autenticar acá
+    // dispara 3 requests extra (bootstrap + registro.php + reintento) contra un
+    // servidor que ya nos está frenando, y profundiza la ventana de bloqueo.
+    // Propagamos directo para que el circuit breaker decida.
+    if (status === 429 || status === 503) {
+        throw new Error(`appWS.php devolvió ${status}`);
+    }
+
     if (looksUnauthenticated(text, status) || status >= 400) {
         session = null;
         s = await getSession();
