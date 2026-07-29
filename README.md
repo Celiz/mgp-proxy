@@ -62,42 +62,70 @@ pnpm install
 pnpm start
 ```
 
-### B. Proxy en el celu (Termux) + clearance desde la PC
+### B. Todo en el celu (Termux + proot-distro)
 
-Chromium en Termux es inviable en la práctica, pero **el proxy sí corre ahí**, que es lo
-que importa para conservar la IP residencial. La PC de casa resuelve el challenge una
-vez y se lo manda: ambos salen por la misma IP pública, que es lo único que Cloudflare
-mira. Como la cookie dura un año, la PC no necesita quedar prendida — sólo la prendés de
-nuevo si cambia la IP.
+Termux nativo no tiene Chromium, pero `proot-distro` te da un Debian ARM64 adentro del
+teléfono, y ahí sí. Es el mismo entorno que el Dockerfile, con la ventaja de mantener la
+IP residencial y el consumo de un celular.
 
-En el teléfono:
+```bash
+pkg install proot-distro
+proot-distro install debian
+proot-distro login debian
+```
+
+Ya adentro de Debian:
+
+```bash
+apt update && apt install -y curl git chromium xvfb xauth
+# el nodejs de apt es la 18 y no alcanza: hace falta WebSocket global (Node 22+)
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt install -y nodejs
+
+git clone https://github.com/Celiz/mgp-proxy && cd mgp-proxy && npm install
+MGP_BROWSER_PATH=/usr/bin/chromium xvfb-run -a npm start
+```
+
+Lo que hay que tener en cuenta antes de arrancar: son unos **2 GB** entre el rootfs de
+Debian y Chromium, y el navegador se abre **cada ~12 minutos** para renovar el clearance
+(unos 20 segundos, ~400 MB de RAM cada vez). En un teléfono viejo con poca RAM eso puede
+ser demasiado; ahí conviene la opción A.
+
+### C. Proxy en el celu + clearance desde otra máquina de la red
+
+Si el celu no da para correr Chromium, el proxy puede vivir en Termux nativo (Node solo)
+mientras otra máquina de la misma red resuelve el challenge y se lo pasa. Funciona porque
+la cookie se ata a la IP pública, que ambos comparten.
+
+En el teléfono, Termux nativo:
 
 ```bash
 pkg install git nodejs
-git clone <este-repo> && cd mgp-proxy && npm install
+git clone https://github.com/Celiz/mgp-proxy && cd mgp-proxy && npm install
 ADMIN_TOKEN=un-token-secreto npm start
 ```
 
-En la PC (misma red), una sola vez:
+En la otra máquina, **cada 10 minutos** (`cron`, o el Programador de tareas de Windows):
 
 ```bash
 ADMIN_TOKEN=un-token-secreto npx tsx src/scripts/obtenerClearance.ts http://192.168.0.X:4000
 ```
 
-El clearance queda persistido en `src/data/clearance.json`, así que sobrevive a los
-reinicios del proxy. Si algún día empieza a devolver 502, es que cambió la IP: volvés a
-correr ese comando. Se puede dejar agendado por las dudas, pero no hace falta a diario.
+El precio es que esa máquina tiene que estar prendida siempre: si se apaga, el proxy
+aguanta ~12 minutos más y después empieza a devolver 502. Si esa máquina es una PC que
+vas a tener encendida igual, es más simple correr el proxy directamente ahí (opción A).
 
-### C. Docker / VPS
+### D. Docker / VPS / Render
 
-El challenge necesita display, así que hay que envolver el arranque con `xvfb`:
+El challenge necesita display, así que el arranque va envuelto en `xvfb` — ya está en el
+`Dockerfile` y en el `render.yaml`. Sin `DISPLAY`, el proxy avisa con `no_display` en vez
+de fallar en silencio.
 
-```bash
-apt-get install -y chromium xvfb
-xvfb-run -a npm start
-```
+Dos cosas que muerden acá: `xvfb-run` necesita `xauth` instalado (si no, aborta con
+`xauth command not found`), y Chromium bajo root exige `--no-sandbox`, que el proxy
+agrega solo al detectar que corre como root en Linux.
 
-Sin `DISPLAY`, el proxy avisa con `no_display` en vez de fallar en silencio.
+Tener en cuenta que sale por IP de datacenter, no residencial, y que abrir Chromium cada
+~12 minutos en una instancia de 512 MB es apretado.
 
 ## ⚙️ Variables de entorno
 

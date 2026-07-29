@@ -182,6 +182,17 @@ type CdpCliente = {
 };
 
 function conectarCdp(url: string): Promise<CdpCliente> {
+    // WebSocket global recién existe desde Node 22. En un Debian de proot-distro
+    // `apt install nodejs` todavía trae la 18, y sin este chequeo el error que
+    // aparece es un "WebSocket is not defined" que no dice qué hacer.
+    if (typeof WebSocket === "undefined") {
+        return Promise.reject(
+            new Error(
+                `node_viejo: hace falta Node 22+ para hablar con el navegador (tenés ${process.version}). ` +
+                    "En Debian/proot: curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt install -y nodejs",
+            ),
+        );
+    }
     return new Promise((resolve, reject) => {
         const ws = new WebSocket(url);
         const pendientes = new Map<number, { ok: (v: any) => void; err: (e: Error) => void }>();
