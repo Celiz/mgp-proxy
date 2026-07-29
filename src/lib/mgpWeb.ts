@@ -313,6 +313,18 @@ export async function obtenerClearanceConNavegador(): Promise<Clearance> {
         "--disable-blink-features=AutomationControlled",
         "--window-size=1280,900",
         "--disable-dev-shm-usage",
+        // Dieta de memoria: sólo hay que cargar una página y esperar a que
+        // Cloudflare libere. En una instancia de 512 MB (o en un celu), un
+        // Chromium con todo prendido se lleva el proceso puesto por OOM.
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-sync",
+        "--disable-translate",
+        "--mute-audio",
+        "--no-zygote",
+        "--renderer-process-limit=1",
+        "--js-flags=--max-old-space-size=192",
     ];
     // En un contenedor el proceso corre como root, y Chromium se niega a
     // arrancar así salvo que se desactive el sandbox. Sólo ahí: en una PC
@@ -439,7 +451,11 @@ function renovar(): Promise<Clearance> {
         );
     }
 
-    console.log("[mgpWeb] renovando clearance (abriendo navegador)...");
+    // El RSS queda registrado antes de abrir el navegador a propósito: si el
+    // contenedor se muere por OOM, esta línea es lo último que se ve y confirma
+    // que llegó hasta acá (un reinicio limpio no deja rastro en ultimoError).
+    const rssMb = Math.round(process.memoryUsage().rss / 1048576);
+    console.log(`[mgpWeb] renovando clearance (abriendo navegador, rss ${rssMb}MB)...`);
     renewing = obtenerClearanceConNavegador()
         .then((c) => {
             clearance = c;
