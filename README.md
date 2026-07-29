@@ -98,13 +98,41 @@ contenedor muere por OOM, la salida es subir de plan; el timeout del challenge
 
 ### C. Celu / Termux
 
-No verificado con este stack. La razón por la que antes hacía falta `proot-distro` +
-Debian (o inyectar el clearance desde otra máquina de la red) era la necesidad de un
-display real para resolver el challenge — eso ya no aplica, `patchright` resuelve
-headless. Pero sigue haciendo falta correr su Chromium, que puede no tener build para
-Termux nativo (Android/Termux no es una distro Linux estándar); probablemente siga
-haciendo falta `proot-distro` con Debian ARM64 y seguir la opción A ahí adentro. Si lo
-probás, contribuí la receta.
+Termux nativo no sirve directo: es un entorno Android/bionic, no una distro Linux
+estándar, y el Chromium que baja `patchright` es un build glibc que no corre ahí. Hace
+falta `proot-distro` para tener una Debian ARM64 de verdad adentro del teléfono — Debian
+arm64 es plataforma [oficialmente soportada por
+Playwright](https://playwright.dev/docs/intro#system-requirements) (la base de
+`patchright`), y ya es el mismo entorno que este repo usaba con el approach viejo (donde
+Chromium corría bien; lo único que fallaba era el CDP crudo sin poder resolver el
+Turnstile, no la plataforma). Dicho esto, **no está probado en un Android real** — si lo
+corrés, contá cómo te fue.
+
+```bash
+pkg install proot-distro
+proot-distro install debian
+proot-distro login debian
+```
+
+Ya adentro de la Debian:
+
+```bash
+apt update && apt install -y curl git python3 python3-venv python3-pip
+# el nodejs de apt suele quedar viejo; Node 22+ vía nodesource
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt install -y nodejs
+
+git clone https://github.com/Celiz/mgp-proxy && cd mgp-proxy
+npm install
+npm run setup:bridge   # crea bridge/.venv, instala Scrapling y baja Chromium
+npm start
+```
+
+Es la misma receta que la Opción A — no hace falta nada extra por estar en el teléfono
+(sin display, sin `xvfb`: el Turnstile se resuelve headless). Si `patchright install
+chromium` no encuentra build para la arquitectura del teléfono, la salida es instalar
+`chromium` por `apt` y apuntar el bridge a ese binario con `MGP_BRIDGE_PYTHON` +
+adaptando `bridge/bridge.py` para pasarle `executable_path` a `StealthySession` — no
+debería hacer falta si Debian arm64 sigue estando soportado, pero queda como plan B.
 
 ## ⚙️ Variables de entorno
 
