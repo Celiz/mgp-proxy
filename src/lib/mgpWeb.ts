@@ -292,6 +292,13 @@ export async function obtenerClearanceConNavegador(): Promise<Clearance> {
         "--window-size=1280,900",
         "--disable-dev-shm-usage",
     ];
+    // En un contenedor el proceso corre como root, y Chromium se niega a
+    // arrancar así salvo que se desactive el sandbox. Sólo ahí: en una PC
+    // normal no hay razón para bajarle las defensas al navegador.
+    const esRoot = process.platform === "linux" && typeof process.getuid === "function" && process.getuid() === 0;
+    if (esRoot || process.env.MGP_BROWSER_NO_SANDBOX) {
+        args.push("--no-sandbox", "--disable-setuid-sandbox");
+    }
     if (process.env.MGP_ALLOW_HEADLESS) args.unshift("--headless=new");
 
     let proc: ChildProcess | null = spawn(navegador, args, { stdio: "ignore" });

@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: mgp-proxy
+    runtime: docker
+    # El plan free da 512 MB, y Chromium bajo xvfb entra muy justo: si el deploy
+    # muere durante la renovación del clearance, lo primero a mirar es memoria.
+    plan: free
+    healthCheckPath: /stats/data
+    envVars:
+      - key: MGP_TRANSPORT
+        value: web
+      - key: MGP_BROWSER_PATH
+        value: /usr/bin/chromium
+      # Ojo: acá el clearance NO se puede inyectar desde casa. La cookie queda
+      # atada a la IP que la pidió, y la IP de Render no es la tuya — el
+      # contenedor tiene que resolver el challenge por su cuenta o no hay proxy.
+      - key: ADMIN_TOKEN
+        generateValue: true
