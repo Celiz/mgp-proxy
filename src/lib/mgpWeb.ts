@@ -391,7 +391,9 @@ export async function obtenerClearanceConNavegador(): Promise<Clearance> {
             await enPagina("Runtime.enable");
             await enPagina("Page.navigate", { url: ENTRY_URL });
 
-            const deadline = Date.now() + CHALLENGE_TIMEOUT_MS;
+            const arranque = Date.now();
+            const deadline = arranque + CHALLENGE_TIMEOUT_MS;
+            let ultimoAviso = 0;
             while (Date.now() < deadline) {
                 await sleep(1500);
                 const r = await enPagina("Runtime.evaluate", {
@@ -405,6 +407,18 @@ export async function obtenerClearanceConNavegador(): Promise<Clearance> {
                 );
                 // El título deja de ser "Un momento…"/"Just a moment…" cuando CF libera.
                 const enChallenge = /momento|moment/i.test(titulo);
+
+                // Cada 15s, un parte de situación: sin esto, cuando el challenge
+                // no sale sólo queda un timeout mudo, y no se distingue "el
+                // navegador ni cargó" de "cargó pero Cloudflare no libera".
+                const transcurrido = Date.now() - arranque;
+                if (transcurrido - ultimoAviso >= 15_000) {
+                    ultimoAviso = transcurrido;
+                    console.log(
+                        `[mgpWeb]   challenge t+${Math.round(transcurrido / 1000)}s — ` +
+                            `título=${JSON.stringify(titulo)} cf_clearance=${cf ? "sí" : "no"}`,
+                    );
+                }
                 if (cf && !enChallenge) {
                     const uaRes = await enPagina("Runtime.evaluate", {
                         expression: "navigator.userAgent",
