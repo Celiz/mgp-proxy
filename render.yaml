@@ -11,6 +11,10 @@ services:
         value: web
       - key: MGP_BROWSER_PATH
         value: /usr/bin/chromium
+      # El plan free da 0.1 de CPU y el challenge de Cloudflare es JS pesado:
+      # lo que en una PC sale en 20s acá puede no entrar en los 90s por defecto.
+      - key: MGP_CHALLENGE_TIMEOUT_MS
+        value: "240000"
       # Ojo: acá el clearance NO se puede inyectar desde casa. La cookie queda
       # atada a la IP que la pidió, y la IP de Render no es la tuya — el
       # contenedor tiene que resolver el challenge por su cuenta o no hay proxy.
