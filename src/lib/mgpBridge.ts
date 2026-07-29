@@ -37,8 +37,11 @@ const RESPAWN_DELAY_MS = 2_000;
 /**
  * Renovación proactiva en segundo plano, antes de que Cloudflare la dé por
  * vencida. El approach viejo midió ~12-15 min de vigencia real; 9 min deja
- * margen. bridge.py no tira la sesión vieja hasta tener la nueva lista, así
- * que una renovación fallida no corta el servicio.
+ * margen. bridge.py cierra la sesión vieja antes de abrir la nueva (la API
+ * sync de Playwright no tolera dos sesiones abiertas a la vez en el mismo
+ * proceso), así que hay un hueco de ~10s sin servir durante la renovación.
+ * Las requests que lleguen en ese hueco quedan en la cola del bridge (ver
+ * `enqueue`) esperando su turno, no se pierden ni fallan.
  */
 const RENEW_INTERVAL_MS = Number(process.env.MGP_BRIDGE_RENEW_MS ?? 9 * 60_000);
 
@@ -160,10 +163,13 @@ function scheduleRenew(): void {
                 log("renovación OK");
             })
             .catch((e) => {
-                // No tocamos `ready`: bridge.py no tira la sesión vieja si la
-                // nueva falla, así que la anterior sigue sirviendo.
+                // No forzamos `ready = false` acá: si bridge.py se quedó sin
+                // página (cerró la vieja y la nueva falló), la próxima fetch
+                // va a recibir un 503 "No page", que `pareceChallenge` ya
+                // detecta y dispara un re-init reactivo solo. No hace falta
+                // duplicar esa lógica acá.
                 lastError = (e as Error).message;
-                log(`renovación falló, sigo con la sesión anterior: ${lastError}`);
+                log(`renovación falló: ${lastError}`);
             })
             .finally(scheduleRenew);
     }, RENEW_INTERVAL_MS);

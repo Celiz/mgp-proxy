@@ -51,8 +51,10 @@ Node (proxy)  ◄──stdin/stdout, JSON por línea──►  bridge/bridge.py 
 
 El bridge es un subproceso Python de larga vida (`bridge/bridge.py`) que el proxy
 arranca solo. Mantiene una sesión de navegador viva y la renueva en segundo plano cada
-~9 minutos (configurable con `MGP_BRIDGE_RENEW_MS`) sin cortar servicio: no tira la
-sesión vieja hasta tener la nueva lista. Si una respuesta huele a challenge (403/503 o
+~9 minutos (configurable con `MGP_BRIDGE_RENEW_MS`). Cada renovación cierra la sesión
+vieja y abre una nueva (~10s) — la API sync de Playwright/patchright no permite tener
+dos sesiones abiertas a la vez en el mismo proceso — pero eso no tira requests: quedan
+en la cola del bridge esperando su turno. Si una respuesta huele a challenge (403/503 o
 HTML de "Just a moment"), fuerza un re-init y reintenta una vez.
 
 Ver `src/lib/mgpBridge.ts` (el lado Node: spawn del subproceso, cola de comandos,

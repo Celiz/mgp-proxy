@@ -44,48 +44,38 @@ class Bridge:
 
     def init(self) -> dict:
         """
-        Resuelve el challenge y arma una sesión nueva. A propósito NO cierra
-        la sesión vieja hasta tener la nueva funcionando: así una renovación
-        en segundo plano que falla (red, CF caído un instante) no tira la
-        sesión que todavía sirve. Ver mgpBridge.ts, que llama a este mismo
-        comando tanto para el arranque como para la renovación periódica.
+        Resuelve el challenge y arma una sesión nueva.
+
+        Cierra la sesión vieja ANTES de abrir la nueva -- a propósito, aunque
+        eso implique un hueco de ~10s sin servir durante una renovación. La
+        API sync de patchright/Playwright no tolera dos sesiones abiertas a
+        la vez en el mismo proceso: cada `StealthySession` sync deja su loop
+        de asyncio corriendo en segundo plano mientras está abierta, y crear
+        una segunda mientras la primera sigue viva revienta con "Playwright
+        Sync API inside the asyncio loop" (medido). Ver mgpBridge.ts, que
+        llama a este mismo comando tanto para el arranque como para la
+        renovación periódica.
         """
+        self.close()
+
         log("Starting StealthySession...")
-        nueva_sesion = StealthySession.__enter__(
+        self.session = StealthySession.__enter__(
             StealthySession(headless=True, solve_cloudflare=True)
         )
 
-        try:
-            log("Solving CF...")
-            resp = nueva_sesion.fetch(ENTRY_URL, network_idle=True)
-            log(f"CF status: {resp.status}")
+        log("Solving CF...")
+        resp = self.session.fetch(ENTRY_URL, network_idle=True)
+        log(f"CF status: {resp.status}")
 
-            nueva_pagina = None
-            pages = nueva_sesion.context.pages
-            if pages:
-                nueva_pagina = pages[0]
-                nueva_pagina.goto(REFERER_URL, wait_until="domcontentloaded")
-                log(f"Page: {nueva_pagina.url}")
+        pages = self.session.context.pages
+        if pages:
+            self.api_page = pages[0]
+            self.api_page.goto(REFERER_URL, wait_until="domcontentloaded")
+            log(f"Page: {self.api_page.url}")
 
-            php_sess_id = next(
-                (c["value"] for c in resp.cookies if c["name"] == "PHPSESSID"), None
-            )
-        except Exception:
-            try:
-                nueva_sesion.__exit__(None, None, None)
-            except Exception:
-                pass
-            raise
-
-        vieja_sesion = self.session
-        self.session = nueva_sesion
-        self.api_page = nueva_pagina
-        if vieja_sesion is not None:
-            try:
-                vieja_sesion.__exit__(None, None, None)
-            except Exception:
-                pass
-
+        php_sess_id = next(
+            (c["value"] for c in resp.cookies if c["name"] == "PHPSESSID"), None
+        )
         log(f"PHPSESSID: {php_sess_id}")
         return {"ok": True, "phpSessId": php_sess_id}
 
