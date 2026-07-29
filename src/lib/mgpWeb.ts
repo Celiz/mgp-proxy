@@ -108,12 +108,15 @@ export function getClearanceInfo(): {
     venceEn: string | null;
     vigente: boolean;
     origen: string | null;
+    /** El UA que resolvió el challenge: Cloudflare valida la cookie contra él. */
+    ua: string | null;
     renovando: boolean;
     ultimoError: string | null;
 } {
     return {
         presente: Boolean(clearance),
         edadMs: clearance ? Date.now() - clearance.at : null,
+        ua: clearance?.ua ?? null,
         venceEn: clearance ? new Date(clearance.at + CLEARANCE_VENCIDO_MS).toISOString() : null,
         vigente: clearance ? !estaVencido(clearance) : false,
         origen: clearance?.origen ?? null,
@@ -272,6 +275,19 @@ function leerPuertoCdp(): number | null {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * ¿Cloudflare acepta este clearance? Se prueba contra el WS real, que es la
+ * única respuesta que vale: la cookie puede existir y aun así rebotar.
+ */
+async function sirveElClearance(c: Clearance): Promise<boolean> {
+    try {
+        const { status, text } = await llamar(c, "accion=RecuperarLineaPorCuandoLlega");
+        return status === 200 && !pareceChallenge(status, text);
+    } catch {
+        return false;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Renovación del clearance
 // ---------------------------------------------------------------------------
@@ -399,13 +415,22 @@ export async function obtenerClearanceConNavegador(): Promise<Clearance> {
                         .map((c) => ({ name: c.name, value: c.value }));
                     // CDP da `expires` en segundos epoch; -1 significa cookie de sesión.
                     const expiraEn = cf.expires && cf.expires > 0 ? cf.expires * 1000 : undefined;
-                    return {
+                    const candidato: Clearance = {
                         cookies: relevantes,
                         ua: String(uaRes.result.value),
                         at: Date.now(),
                         expiraEn,
                         origen: "browser",
                     };
+
+                    // Que exista la cookie y el título haya cambiado no garantiza
+                    // que Cloudflare la acepte: en un equipo lento (un celular,
+                    // por ejemplo) se la puede agarrar antes de que el challenge
+                    // termine del todo, y después rebota con 403 en cada request.
+                    // Se prueba de verdad antes de darla por buena; si no sirve,
+                    // el loop sigue esperando a que aparezca una que sí.
+                    if (await sirveElClearance(candidato)) return candidato;
+                    console.warn("[mgpWeb] la cookie todavía no es aceptada, sigo esperando...");
                 }
             }
             throw new Error(`el challenge no se resolvió en ${Math.round(CHALLENGE_TIMEOUT_MS / 1000)}s`);

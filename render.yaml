@@ -2,8 +2,13 @@ services:
   - type: web
     name: mgp-proxy
     runtime: docker
-    # El plan free da 512 MB, y Chromium bajo xvfb entra muy justo: si el deploy
-    # muere durante la renovación del clearance, lo primero a mirar es memoria.
+    # OJO: en el plan free esto NO funciona, probado. Da 512 MB y 0.1 de CPU, y
+    # el challenge de Cloudflare choca contra las dos cosas: con el timeout por
+    # defecto (90s) Chromium no llega a resolverlo, y si se le da más tiempo se
+    # come la memoria y el contenedor muere por OOM y reinicia.
+    #
+    # Hace falta una instancia con ~2 GB y CPU de verdad. Queda como referencia
+    # para ese caso; para el día a día conviene la opción A o B del README.
     plan: free
     healthCheckPath: /stats/data
     envVars:
@@ -11,10 +16,11 @@ services:
         value: web
       - key: MGP_BROWSER_PATH
         value: /usr/bin/chromium
-      # El plan free da 0.1 de CPU y el challenge de Cloudflare es JS pesado:
-      # lo que en una PC sale en 20s acá puede no entrar en los 90s por defecto.
+      # En una instancia lenta el challenge tarda mucho más que en una PC (20s).
+      # Subirlo sólo tiene sentido si hay memoria de sobra: con poca RAM, darle
+      # más tiempo a Chromium termina en OOM en vez de en éxito.
       - key: MGP_CHALLENGE_TIMEOUT_MS
-        value: "240000"
+        value: "180000"
       # Ojo: acá el clearance NO se puede inyectar desde casa. La cookie queda
       # atada a la IP que la pidió, y la IP de Render no es la tuya — el
       # contenedor tiene que resolver el challenge por su cuenta o no hay proxy.

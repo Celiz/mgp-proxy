@@ -120,12 +120,18 @@ El challenge necesita display, así que el arranque va envuelto en `xvfb` — ya
 `Dockerfile` y en el `render.yaml`. Sin `DISPLAY`, el proxy avisa con `no_display` en vez
 de fallar en silencio.
 
-Dos cosas que muerden acá: `xvfb-run` necesita `xauth` instalado (si no, aborta con
-`xauth command not found`), y Chromium bajo root exige `--no-sandbox`, que el proxy
-agrega solo al detectar que corre como root en Linux.
+**El plan free de Render no alcanza** — probado, no es teoría. Con 512 MB y 0.1 de CPU,
+el challenge choca contra las dos paredes: con el timeout por defecto Chromium no llega a
+resolverlo, y si se le da más tiempo se come la memoria y el contenedor muere por OOM.
+Hace falta una instancia de ~2 GB con CPU real.
 
-Tener en cuenta que sale por IP de datacenter, no residencial, y que abrir Chromium cada
-~12 minutos en una instancia de 512 MB es apretado.
+Queda pendiente saber si Cloudflare además trata distinto a las IP de datacenter: no se
+pudo medir, porque la memoria se acabó antes de llegar a averiguarlo.
+
+Dos detalles que ya están resueltos en el `Dockerfile` pero conviene conocer: `xvfb-run`
+necesita `xauth` (si no, aborta con `xauth command not found`) — por eso se usa `Xvfb`
+directo — y Chromium bajo root exige `--no-sandbox`, que el proxy agrega solo cuando
+detecta que corre como root en Linux.
 
 ## ⚙️ Variables de entorno
 
