@@ -38,16 +38,19 @@ const ORIGIN = "https://appsl.mardelplata.gob.ar";
 /** Timeout de cada llamada a webWS.php. */
 const CALL_TIMEOUT_MS = 12_000;
 /**
- * Cuánto damos por bueno un clearance cuando la cookie no declara vencimiento.
+ * Cuánto dura un clearance de verdad.
  *
- * Normalmente sí lo declara, y con holgura: MGP tiene el TTL de Cloudflare en el
- * máximo, así que `cf_clearance` vive 365 días. Lo que la invalida en la práctica
- * no es el tiempo sino un cambio de IP pública, y eso se detecta solo al primer
- * 403. Por eso no hay renovación periódica: sería abrir el navegador de gusto.
+ * OJO: el atributo `Expires` de la cookie dice 365 días y es una pista falsa.
+ * Cloudflare decide aparte, del lado del servidor, hasta cuándo lo acepta
+ * ("challenge passage"), y eso no viaja en la cookie. Medido contra MGP con una
+ * request cada 3 minutos: anduvo hasta los 12 min y rebotó a los 15.
+ *
+ * De ahí los dos umbrales: a los 9 min renovamos en segundo plano mientras
+ * seguimos sirviendo con el clearance viejo, y a los 13 lo damos por muerto y
+ * las requests esperan. Así el vencimiento no se le aparece nunca al usuario.
  */
-const CLEARANCE_TTL_FALLBACK_MS = Number(process.env.MGP_CLEARANCE_TTL_MS ?? 6 * 60 * 60_000);
-/** Margen con el que renovamos antes del vencimiento declarado. */
-const MARGEN_VENCIMIENTO_MS = 6 * 60 * 60_000;
+const CLEARANCE_RENOVAR_MS = Number(process.env.MGP_CLEARANCE_TTL_MS ?? 9 * 60_000);
+const CLEARANCE_VENCIDO_MS = Number(process.env.MGP_CLEARANCE_MAX_MS ?? 13 * 60_000);
 /** Techo para resolver el challenge (medido: ~20s en una corrida normal). */
 const CHALLENGE_TIMEOUT_MS = Number(process.env.MGP_CHALLENGE_TIMEOUT_MS ?? 90_000);
 /** Cooldown tras un fallo de renovación: no abrimos navegadores en ráfaga. */
@@ -70,16 +73,24 @@ export type Clearance = {
     ua: string;
     /** Cuándo se obtuvo. */
     at: number;
-    /** Vencimiento declarado por cf_clearance, en ms epoch (si lo declara). */
+    /**
+     * Vencimiento que declara la cookie, en ms epoch. Informativo nada más: dice
+     * 365 días y Cloudflare la rechaza a los ~13 min igual. La vigencia real se
+     * calcula sobre `at`.
+     */
     expiraEn?: number;
     /** Cómo se obtuvo: navegador local o inyectado desde afuera. */
     origen: "browser" | "externo";
 };
 
-/** ¿Sigue vigente, con margen? */
-function estaVigente(c: Clearance): boolean {
-    if (c.expiraEn) return Date.now() < c.expiraEn - MARGEN_VENCIMIENTO_MS;
-    return Date.now() - c.at < CLEARANCE_TTL_FALLBACK_MS;
+/** Todavía sirve, pero conviene ir renovándolo en segundo plano. */
+function convieneRenovar(c: Clearance): boolean {
+    return Date.now() - c.at >= CLEARANCE_RENOVAR_MS;
+}
+
+/** Ya no es confiable: hay que esperar uno nuevo antes de seguir. */
+function estaVencido(c: Clearance): boolean {
+    return Date.now() - c.at >= CLEARANCE_VENCIDO_MS;
 }
 
 let clearance: Clearance | null = null;
@@ -103,8 +114,8 @@ export function getClearanceInfo(): {
     return {
         presente: Boolean(clearance),
         edadMs: clearance ? Date.now() - clearance.at : null,
-        venceEn: clearance?.expiraEn ? new Date(clearance.expiraEn).toISOString() : null,
-        vigente: clearance ? estaVigente(clearance) : false,
+        venceEn: clearance ? new Date(clearance.at + CLEARANCE_VENCIDO_MS).toISOString() : null,
+        vigente: clearance ? !estaVencido(clearance) : false,
         origen: clearance?.origen ?? null,
         renovando: Boolean(renewing),
         ultimoError: ultimoErrorRenovacion,
@@ -384,13 +395,37 @@ export async function obtenerClearanceConNavegador(): Promise<Clearance> {
 }
 
 async function obtenerClearance(): Promise<Clearance> {
-    if (clearance && estaVigente(clearance)) return clearance;
+    // Todavía fresco: nada que hacer.
+    if (clearance && !convieneRenovar(clearance)) return clearance;
+
+    // Zona de gracia: sigue sirviendo pero le queda poco. Disparamos la
+    // renovación sin esperarla y contestamos con el actual, así el usuario no
+    // paga los ~20s del navegador.
+    if (clearance && !estaVencido(clearance)) {
+        void renovar().catch(() => {
+            // El error ya quedó en ultimoErrorRenovacion; si el clearance llega a
+            // vencer del todo, la próxima request espera y ahí sí propaga.
+        });
+        return clearance;
+    }
+
     if (renewing) return renewing;
     if (Date.now() < renewCooldownUntil) {
         // Con un clearance viejo pero existente conviene intentar igual: puede
         // seguir siendo válido y es mejor que devolver error seguro.
         if (clearance) return clearance;
         throw new Error(`mgp_clearance_cooldown: ${ultimoErrorRenovacion ?? "renovación en cooldown"}`);
+    }
+    return renovar();
+}
+
+/** Renueva el clearance, con una sola renovación en vuelo a la vez. */
+function renovar(): Promise<Clearance> {
+    if (renewing) return renewing;
+    if (Date.now() < renewCooldownUntil) {
+        return Promise.reject(
+            new Error(`mgp_clearance_cooldown: ${ultimoErrorRenovacion ?? "renovación en cooldown"}`),
+        );
     }
 
     console.log("[mgpWeb] renovando clearance (abriendo navegador)...");
