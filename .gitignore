@@ -8,3 +8,8 @@ dist/
 # Cookies de sesión de MGP (cf_clearance + PHPSESSID) y perfil del navegador
 src/data/clearance.json
 .browser-profile/
+
+# Datos que cada instancia escribe en runtime: versionarlos hace que cada
+# `git pull` en el celu choque contra lo que el proxy acaba de guardar.
+src/data/stats.json
+src/data/analytics-local.json
