@@ -29,120 +29,94 @@ El WS web no tiene esa regla; su única barrera es el challenge de Cloudflare.
 
 ### Cómo se pasa el challenge
 
-`cf_clearance` sólo la consigue un navegador **con display real** (`--headless=new`
-no resuelve el challenge). Pero una vez obtenida, un `fetch()` común de Node con esa
-cookie funciona perfecto. Entonces:
+Cloudflare pasó a un **Turnstile no-interactivo**. Un Chrome automatizado por CDP (el
+approach viejo de este proxy) nunca lo resolvía headless, y ni con un display real lo
+pasaba de forma confiable — medido, se quedó sin funcionar. La solución que sí anda:
+[Scrapling](https://github.com/D4Vinci/Scrapling) con `patchright` (un fork "stealth" de
+Playwright), que resuelve el Turnstile **headless** en unos 10 segundos.
+
+La otra diferencia con el approach viejo: en vez de extraer `cf_clearance` y repetirla
+con `fetch()` de Node (lo que andaba con el challenge anterior, pero no hay garantía
+de que siga sirviendo contra Turnstile — puede validar más señales que la cookie sola,
+como el fingerprint TLS/HTTP2), **cada request se hace adentro del navegador** con
+`page.evaluate(fetch(...))`, igual que el SPA oficial:
 
 ```
-navegador (una vez, ~20s)  ──►  cf_clearance
-                                     │
-requests normales ──► fetch() con esa cookie ──► webWS.php
+Node (proxy)  ◄──stdin/stdout, JSON por línea──►  bridge/bridge.py (Scrapling)
+                                                          │
+                                          navegador headless (patchright)
+                                                          │
+                                          fetch('webWS.php') desde la página
 ```
 
-Tres cosas medidas que vale la pena saber:
+El bridge es un subproceso Python de larga vida (`bridge/bridge.py`) que el proxy
+arranca solo. Mantiene una sesión de navegador viva y la renueva en segundo plano cada
+~9 minutos (configurable con `MGP_BRIDGE_RENEW_MS`) sin cortar servicio: no tira la
+sesión vieja hasta tener la nueva lista. Si una respuesta huele a challenge (403/503 o
+HTML de "Just a moment"), fuerza un re-init y reintenta una vez.
 
-- **La cookie dura 365 días.** MGP tiene el TTL de Cloudflare en el máximo, así que
-  esto no es un ritual periódico: se resuelve una vez y listo.
-- **Alcanza con `cf_clearance` sola** — sin ella es 403; el `PHPSESSID` no hace falta.
-- **Está atada a la IP pública y al User-Agent, no al equipo.** Por eso el proxy puede
-  correr donde no hay navegador mientras otra máquina de la misma red le acerque la
-  cookie.
-
-Lo que la invalida en la práctica no es el tiempo sino un cambio de IP pública. Cuando
-pasa, el primer 403 dispara la renovación automática y la request se reintenta sola.
+Ver `src/lib/mgpBridge.ts` (el lado Node: spawn del subproceso, cola de comandos,
+renovación) y `bridge/bridge.py` (el lado Python: Scrapling + la llamada real).
 
 ## 🚀 Formas de desplegarlo
 
-### A. Todo en una PC (lo más simple)
+### A. PC / servidor Linux
 
-Necesita Chrome o Chromium instalado. El proxy resuelve el challenge solo.
-
-```bash
-pnpm install
-pnpm start
-```
-
-### B. Todo en el celu (Termux + proot-distro)
-
-Termux nativo no tiene Chromium, pero `proot-distro` te da un Debian ARM64 adentro del
-teléfono, y ahí sí. Es el mismo entorno que el Dockerfile, con la ventaja de mantener la
-IP residencial y el consumo de un celular.
+Hace falta Node 22+ y Python 3.10+ (no hace falta Chrome del sistema: patchright baja su
+propio Chromium). El bridge corre en un venv aparte, en `bridge/`:
 
 ```bash
-pkg install proot-distro
-proot-distro install debian
-proot-distro login debian
+npm install
+npm run setup:bridge   # crea bridge/.venv, instala Scrapling y baja Chromium
+npm start
 ```
 
-Ya adentro de Debian:
+`setup:bridge` es un atajo de:
 
 ```bash
-apt update && apt install -y curl git chromium xvfb xauth
-# el nodejs de apt es la 18 y no alcanza: hace falta WebSocket global (Node 22+)
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt install -y nodejs
-
-git clone https://github.com/Celiz/mgp-proxy && cd mgp-proxy && npm install
-MGP_BROWSER_PATH=/usr/bin/chromium xvfb-run -a npm start
+python3 -m venv bridge/.venv
+bridge/.venv/bin/pip install -r bridge/requirements.txt
+bridge/.venv/bin/patchright install chromium
 ```
 
-Lo que hay que tener en cuenta antes de arrancar: son unos **2 GB** entre el rootfs de
-Debian y Chromium, y el navegador se abre **cada ~12 minutos** para renovar el clearance
-(unos 20 segundos, ~400 MB de RAM cada vez). En un teléfono viejo con poca RAM eso puede
-ser demasiado; ahí conviene la opción A.
+No hace falta display ni `xvfb`: el Turnstile se resuelve headless.
 
-### C. Proxy en el celu + clearance desde otra máquina de la red
-
-Si el celu no da para correr Chromium, el proxy puede vivir en Termux nativo (Node solo)
-mientras otra máquina de la misma red resuelve el challenge y se lo pasa. Funciona porque
-la cookie se ata a la IP pública, que ambos comparten.
-
-En el teléfono, Termux nativo:
+### B. Docker / VPS / Render
 
 ```bash
-pkg install git nodejs
-git clone https://github.com/Celiz/mgp-proxy && cd mgp-proxy && npm install
-ADMIN_TOKEN=un-token-secreto npm start
+docker build -t mgp-proxy .
+docker run -p 4000:4000 mgp-proxy
 ```
 
-En la otra máquina, **cada 10 minutos** (`cron`, o el Programador de tareas de Windows):
+El `Dockerfile` instala el venv del bridge y su Chromium en la imagen. `render.yaml`
+tiene la config lista para Render — el health check pega a `/stats/data`.
 
-```bash
-ADMIN_TOKEN=un-token-secreto npx tsx src/scripts/obtenerClearance.ts http://192.168.0.X:4000
-```
+No está verificado cuánta RAM pide `patchright` en un contenedor de 512 MB reales (el
+approach viejo, con Chrome real + Xvfb, confirmadamente no entraba ahí). Si el
+contenedor muere por OOM, la salida es subir de plan; el timeout del challenge
+(`MGP_CHALLENGE_TIMEOUT_MS`) ya viene generoso por si la CPU es lenta.
 
-El precio es que esa máquina tiene que estar prendida siempre: si se apaga, el proxy
-aguanta ~12 minutos más y después empieza a devolver 502. Si esa máquina es una PC que
-vas a tener encendida igual, es más simple correr el proxy directamente ahí (opción A).
+### C. Celu / Termux
 
-### D. Docker / VPS / Render
-
-El challenge necesita display, así que el arranque va envuelto en `xvfb` — ya está en el
-`Dockerfile` y en el `render.yaml`. Sin `DISPLAY`, el proxy avisa con `no_display` en vez
-de fallar en silencio.
-
-**El plan free de Render no alcanza** — probado, no es teoría. Con 512 MB y 0.1 de CPU,
-el challenge choca contra las dos paredes: con el timeout por defecto Chromium no llega a
-resolverlo, y si se le da más tiempo se come la memoria y el contenedor muere por OOM.
-Hace falta una instancia de ~2 GB con CPU real.
-
-Queda pendiente saber si Cloudflare además trata distinto a las IP de datacenter: no se
-pudo medir, porque la memoria se acabó antes de llegar a averiguarlo.
-
-Dos detalles que ya están resueltos en el `Dockerfile` pero conviene conocer: `xvfb-run`
-necesita `xauth` (si no, aborta con `xauth command not found`) — por eso se usa `Xvfb`
-directo — y Chromium bajo root exige `--no-sandbox`, que el proxy agrega solo cuando
-detecta que corre como root en Linux.
+No verificado con este stack. La razón por la que antes hacía falta `proot-distro` +
+Debian (o inyectar el clearance desde otra máquina de la red) era la necesidad de un
+display real para resolver el challenge — eso ya no aplica, `patchright` resuelve
+headless. Pero sigue haciendo falta correr su Chromium, que puede no tener build para
+Termux nativo (Android/Termux no es una distro Linux estándar); probablemente siga
+haciendo falta `proot-distro` con Debian ARM64 y seguir la opción A ahí adentro. Si lo
+probás, contribuí la receta.
 
 ## ⚙️ Variables de entorno
 
 | Variable | Default | Para qué |
 |---|---|---|
 | `PORT` / `HOST` | `4000` / `0.0.0.0` | Dónde escucha |
-| `MGP_TRANSPORT` | `web` | `web` (WS web) o `v670` (app Cordova, hoy bloqueado) |
-| `ADMIN_TOKEN` | — | Habilita `POST /admin/clearance`. Sin esto, el endpoint responde 403 |
-| `MGP_BROWSER_PATH` | autodetecta | Ruta al Chrome/Chromium si no está donde se lo busca |
-| `MGP_CLEARANCE_TTL_MS` | `21600000` (6 h) | Vigencia asumida **sólo** si la cookie no declara vencimiento; normalmente manda el vencimiento real |
-| `MGP_PROXY_URL` | — | Destino por defecto del script de clearance |
+| `MGP_TRANSPORT` | `web` | `web` (WS web vía bridge) o `v670` (app Cordova, hoy bloqueado) |
+| `ADMIN_TOKEN` | — | Habilita `POST /admin/bridge/restart`. Sin esto, el endpoint responde 403 |
+| `MGP_BRIDGE_PYTHON` | `bridge/.venv/bin/python3` | Ruta al intérprete Python del bridge |
+| `MGP_CHALLENGE_TIMEOUT_MS` | `90000` | Techo para resolver el Turnstile (medido: ~10s en una PC) |
+| `MGP_BRIDGE_FETCH_TIMEOUT_MS` | `15000` | Timeout de cada request a `webWS.php` vía el bridge |
+| `MGP_BRIDGE_RENEW_MS` | `540000` (9 min) | Cada cuánto renueva la sesión en segundo plano |
 | `MGP_RSA_PUBKEY` / `MGP_SHARED_KEY` | — | Sólo con `MGP_TRANSPORT=v670` |
 | `ALLOWED_ORIGINS` | todos | Lista separada por comas para CORS |
 
@@ -167,8 +141,8 @@ cloudflared tunnel run bondi-proxy
 
 ## 📊 Monitoreo
 
-- `GET /stats` — dashboard en vivo (requests, caché, breaker, estado del clearance)
-- `GET /stats/data` — el mismo snapshot en JSON
+- `GET /stats` — dashboard en vivo (requests, caché, breaker, estado del bridge)
+- `GET /stats/data` — el mismo snapshot en JSON (incluye `bridge: { ready, restarts, lastError, ... }`)
 - `GET /stats/analytics` — analytics de producto (persistente)
 
 ## 🔌 Endpoints
@@ -177,7 +151,7 @@ cloudflared tunnel run bondi-proxy
 |---|---|---|
 | `/` | POST | Proxy principal, body `application/x-www-form-urlencoded` |
 | `/mgp/:accion` | GET | Igual pero por querystring |
-| `/admin/clearance` | POST | Inyecta un clearance externo. Requiere `x-admin-token` |
+| `/admin/bridge/restart` | POST | Fuerza un re-init del bridge. Requiere `x-admin-token` |
 
 ### Acciones del WS (`accion=`)
 

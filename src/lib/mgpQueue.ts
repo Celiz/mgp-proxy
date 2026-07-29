@@ -12,7 +12,7 @@
  */
 
 import { fetchMgpDirect, isMgpDirectEnabled } from "./mgpDirect.js";
-import { fetchMgpWeb, isMgpWebEnabled } from "./mgpWeb.js";
+import { fetchMgpBridge, isMgpBridgeEnabled } from "./mgpBridge.js";
 import { recordBreakerState, recordMgp } from "../stats.js";
 
 // ---------------------------------------------------------------------------
@@ -196,10 +196,12 @@ async function callMgpProxy(body: string): Promise<unknown> {
 // ---------------------------------------------------------------------------
 
 async function doFetch(body: string): Promise<unknown> {
-    // Transporte por defecto: el WS web. El camino V670 (mgpDirect) quedó
-    // detrás de MGP_TRANSPORT=v670 porque Cloudflare lo tiene con 429
-    // permanente — se conserva por si algún día se libera esa regla.
-    if (isMgpWebEnabled()) return fetchMgpWeb(body);
+    // Transporte por defecto: el WS web vía el bridge Python (Scrapling +
+    // patchright resuelve Cloudflare, ver mgpBridge.ts). El camino V670
+    // (mgpDirect) quedó detrás de MGP_TRANSPORT=v670 porque Cloudflare lo
+    // tiene con 429 permanente — se conserva por si algún día se libera esa
+    // regla.
+    if (isMgpBridgeEnabled()) return fetchMgpBridge(body);
     return isMgpDirectEnabled() ? fetchMgpDirect(body) : callMgpProxy(body);
 }
 

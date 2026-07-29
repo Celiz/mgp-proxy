@@ -5,7 +5,8 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "npx tsx src/index.ts",
-    "start:docker": "tsx src/index.ts"
+    "start:docker": "tsx src/index.ts",
+    "setup:bridge": "python3 -m venv bridge/.venv && bridge/.venv/bin/pip install --upgrade pip && bridge/.venv/bin/pip install -r bridge/requirements.txt && bridge/.venv/bin/patchright install chromium"
   },
   "dependencies": {
     "@hono/node-server": "2.0.8",

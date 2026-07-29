@@ -2,27 +2,22 @@ services:
   - type: web
     name: mgp-proxy
     runtime: docker
-    # OJO: en el plan free esto NO funciona, probado. Da 512 MB y 0.1 de CPU, y
-    # el challenge de Cloudflare choca contra las dos cosas: con el timeout por
-    # defecto (90s) Chromium no llega a resolverlo, y si se le da más tiempo se
-    # come la memoria y el contenedor muere por OOM y reinicia.
-    #
-    # Hace falta una instancia con ~2 GB y CPU de verdad. Queda como referencia
-    # para ese caso; para el día a día conviene la opción A o B del README.
+    # El approach viejo (CDP + Chrome real + Xvfb) medía 90s+ para resolver el
+    # challenge y confirmadamente no entraba en el free tier (512 MB / 0.1
+    # CPU). El bridge actual (Scrapling/patchright) resuelve el Turnstile
+    # headless en ~10s en una PC — sin Xvfb, que era parte del problema de
+    # memoria. No está verificado todavía cuánta RAM pide patchright bajo
+    # 512 MB reales; si el contenedor muere por OOM, subir de plan.
     plan: free
     healthCheckPath: /stats/data
     envVars:
       - key: MGP_TRANSPORT
         value: web
-      - key: MGP_BROWSER_PATH
-        value: /usr/bin/chromium
-      # En una instancia lenta el challenge tarda mucho más que en una PC (20s).
-      # Subirlo sólo tiene sentido si hay memoria de sobra: con poca RAM, darle
-      # más tiempo a Chromium termina en OOM en vez de en éxito.
+      # Techo para resolver el challenge. Generoso a propósito: en una
+      # instancia lenta puede tardar más que los ~10s medidos en una PC.
       - key: MGP_CHALLENGE_TIMEOUT_MS
         value: "180000"
-      # Ojo: acá el clearance NO se puede inyectar desde casa. La cookie queda
-      # atada a la IP que la pidió, y la IP de Render no es la tuya — el
-      # contenedor tiene que resolver el challenge por su cuenta o no hay proxy.
+      # Habilita POST /admin/bridge/restart, para forzar un re-init manual si
+      # el bridge queda pegado sin tener que reiniciar el servicio entero.
       - key: ADMIN_TOKEN
         generateValue: true
