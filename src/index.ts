@@ -6,7 +6,7 @@ import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import { enqueueMgp, getMgpQueueStats } from "./lib/mgpQueue.js";
-import { cargarClearanceDeDisco, esRespuestaOk, getClearanceInfo, setClearance } from "./lib/mgpWeb.js";
+import { esRespuestaOk, forceReinit, getBridgeStatus } from "./lib/mgpBridge.js";
 import { hashClient, trackQuery } from "./lib/analytics.js";
 import {
     recordAccion,
@@ -342,40 +342,27 @@ app.get("/stats", (c) => {
 });
 
 app.get("/stats/data", (c) => {
-    return c.json({ ...snapshot(), queue: getMgpQueueStats(), clearance: getClearanceInfo() });
+    return c.json({ ...snapshot(), queue: getMgpQueueStats(), bridge: getBridgeStatus() });
 });
 
-// 5c. Clearance remoto
+// 5c. Reinicio manual del bridge
 //
-// El challenge de Cloudflare sólo lo resuelve un navegador con display, y la
-// cookie queda atada a la IP pública, no al equipo. Así, una máquina de la misma
-// red (por ejemplo la PC de casa) puede resolverlo y acercárselo al proxy, que
-// puede seguir corriendo en un lugar sin navegador — Termux, por caso.
-// Ver `src/scripts/obtenerClearance.ts`.
-app.post("/admin/clearance", async (c) => {
+// El bridge (bridge/bridge.py) resuelve Cloudflare solo y se renueva en
+// segundo plano (ver mgpBridge.ts), pero este endpoint sirve para forzar un
+// re-init manual si queda pegado, sin tener que reiniciar el proceso entero.
+app.post("/admin/bridge/restart", async (c) => {
     if (!env.ADMIN_TOKEN) {
         return c.json({ error: "admin_deshabilitado", message: "Definí ADMIN_TOKEN para usar este endpoint" }, 403);
     }
     if (c.req.header("x-admin-token") !== env.ADMIN_TOKEN) {
         return c.json({ error: "unauthorized" }, 401);
     }
-    const payload = await c.req.json().catch(() => null);
-    const parsed = z
-        .object({
-            cookies: z.array(z.object({ name: z.string(), value: z.string() })).min(1),
-            ua: z.string().min(1),
-            at: z.number().optional(),
-            expiraEn: z.number().optional(),
-        })
-        .safeParse(payload);
-    if (!parsed.success) {
-        return c.json({ error: "payload_invalido", issues: parsed.error.issues }, 400);
+    try {
+        await forceReinit();
+        return c.json({ ok: true, bridge: getBridgeStatus() });
+    } catch (e) {
+        return c.json({ ok: false, error: (e as Error).message, bridge: getBridgeStatus() }, 502);
     }
-    if (!parsed.data.cookies.some((k) => k.name === "cf_clearance")) {
-        return c.json({ error: "sin_cf_clearance", message: "El payload no trae la cookie cf_clearance" }, 400);
-    }
-    setClearance(parsed.data);
-    return c.json({ ok: true, clearance: getClearanceInfo() });
 });
 
 // 5b. Analytics Dashboard (persistent data)
@@ -394,8 +381,7 @@ app.get("/stats/analytics/data", async (c) => {
 // 6. Start Server
 async function start() {
     await loadStats();
-    if (env.MGP_TRANSPORT === "web") cargarClearanceDeDisco();
-    
+
     // Guardar periódicamente cada 1 minuto
     setInterval(saveStats, 60_000);
     
