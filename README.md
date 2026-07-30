@@ -57,8 +57,22 @@ dos sesiones abiertas a la vez en el mismo proceso — pero eso no tira requests
 en la cola del bridge esperando su turno. Si una respuesta huele a challenge (403/503 o
 HTML de "Just a moment"), fuerza un re-init y reintenta una vez.
 
+Como el bridge sólo procesa un comando por vez (no hay pipelining), toda request pasa
+por una cola FIFO. Tres cosas la protegen para que una renovación o una ráfaga no
+terminen tirando el circuit breaker general (`src/lib/mgpQueue.ts`):
+
+- La renovación evita meterse a la fuerza en medio de tráfico: si hay algo en cola,
+  reintenta en unos segundos (hasta un techo, para no postergarse para siempre).
+- Por encima de `MGP_BRIDGE_MAX_QUEUE` (6 por defecto) requests esperando turno, las
+  nuevas se rechazan rápido con `bridge_busy` en vez de sumarse a una fila sin techo.
+- `bridge_busy` no cuenta para el circuit breaker: significa que el bridge está
+  saturado, no que MGP esté fallando, así que `mgpQueue.ts` lo deja pasar sin sumar a
+  `consecutiveErrors`. El resto de los errores (los que sí vienen de una respuesta real
+  de MGP) siguen contando normal.
+
 Ver `src/lib/mgpBridge.ts` (el lado Node: spawn del subproceso, cola de comandos,
-renovación) y `bridge/bridge.py` (el lado Python: Scrapling + la llamada real).
+renovación, tope de cola) y `bridge/bridge.py` (el lado Python: Scrapling + la llamada
+real).
 
 ## 🚀 Formas de desplegarlo
 
@@ -147,6 +161,7 @@ debería hacer falta si Debian arm64 sigue estando soportado, pero queda como pl
 | `MGP_CHALLENGE_TIMEOUT_MS` | `90000` | Techo para resolver el Turnstile (medido: ~10s en una PC) |
 | `MGP_BRIDGE_FETCH_TIMEOUT_MS` | `15000` | Timeout de cada request a `webWS.php` vía el bridge |
 | `MGP_BRIDGE_RENEW_MS` | `540000` (9 min) | Cada cuánto renueva la sesión en segundo plano |
+| `MGP_BRIDGE_MAX_QUEUE` | `6` | Tope de requests esperando turno en el bridge antes de rechazar rápido con `bridge_busy` |
 | `MGP_RSA_PUBKEY` / `MGP_SHARED_KEY` | — | Sólo con `MGP_TRANSPORT=v670` |
 | `ALLOWED_ORIGINS` | todos | Lista separada por comas para CORS |
 
