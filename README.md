@@ -51,12 +51,28 @@ Node (proxy)  ◄──stdin/stdout, JSON por línea──►  bridge/bridge.py 
 
 El bridge es un subproceso Python de larga vida (`bridge/bridge.py`) que el proxy
 arranca solo. Mantiene una sesión de navegador viva y la renueva en segundo plano cada
-~9 minutos (configurable con `MGP_BRIDGE_RENEW_MS`) sin cortar servicio: no tira la
-sesión vieja hasta tener la nueva lista. Si una respuesta huele a challenge (403/503 o
+~9 minutos (configurable con `MGP_BRIDGE_RENEW_MS`). Cada renovación cierra la sesión
+vieja y abre una nueva (~10s) — la API sync de Playwright/patchright no permite tener
+dos sesiones abiertas a la vez en el mismo proceso — pero eso no tira requests: quedan
+en la cola del bridge esperando su turno. Si una respuesta huele a challenge (403/503 o
 HTML de "Just a moment"), fuerza un re-init y reintenta una vez.
 
+Como el bridge sólo procesa un comando por vez (no hay pipelining), toda request pasa
+por una cola FIFO. Tres cosas la protegen para que una renovación o una ráfaga no
+terminen tirando el circuit breaker general (`src/lib/mgpQueue.ts`):
+
+- La renovación evita meterse a la fuerza en medio de tráfico: si hay algo en cola,
+  reintenta en unos segundos (hasta un techo, para no postergarse para siempre).
+- Por encima de `MGP_BRIDGE_MAX_QUEUE` (6 por defecto) requests esperando turno, las
+  nuevas se rechazan rápido con `bridge_busy` en vez de sumarse a una fila sin techo.
+- `bridge_busy` no cuenta para el circuit breaker: significa que el bridge está
+  saturado, no que MGP esté fallando, así que `mgpQueue.ts` lo deja pasar sin sumar a
+  `consecutiveErrors`. El resto de los errores (los que sí vienen de una respuesta real
+  de MGP) siguen contando normal.
+
 Ver `src/lib/mgpBridge.ts` (el lado Node: spawn del subproceso, cola de comandos,
-renovación) y `bridge/bridge.py` (el lado Python: Scrapling + la llamada real).
+renovación, tope de cola) y `bridge/bridge.py` (el lado Python: Scrapling + la llamada
+real).
 
 ## 🚀 Formas de desplegarlo
 
@@ -98,13 +114,41 @@ contenedor muere por OOM, la salida es subir de plan; el timeout del challenge
 
 ### C. Celu / Termux
 
-No verificado con este stack. La razón por la que antes hacía falta `proot-distro` +
-Debian (o inyectar el clearance desde otra máquina de la red) era la necesidad de un
-display real para resolver el challenge — eso ya no aplica, `patchright` resuelve
-headless. Pero sigue haciendo falta correr su Chromium, que puede no tener build para
-Termux nativo (Android/Termux no es una distro Linux estándar); probablemente siga
-haciendo falta `proot-distro` con Debian ARM64 y seguir la opción A ahí adentro. Si lo
-probás, contribuí la receta.
+Termux nativo no sirve directo: es un entorno Android/bionic, no una distro Linux
+estándar, y el Chromium que baja `patchright` es un build glibc que no corre ahí. Hace
+falta `proot-distro` para tener una Debian ARM64 de verdad adentro del teléfono — Debian
+arm64 es plataforma [oficialmente soportada por
+Playwright](https://playwright.dev/docs/intro#system-requirements) (la base de
+`patchright`), y ya es el mismo entorno que este repo usaba con el approach viejo (donde
+Chromium corría bien; lo único que fallaba era el CDP crudo sin poder resolver el
+Turnstile, no la plataforma). Dicho esto, **no está probado en un Android real** — si lo
+corrés, contá cómo te fue.
+
+```bash
+pkg install proot-distro
+proot-distro install debian
+proot-distro login debian
+```
+
+Ya adentro de la Debian:
+
+```bash
+apt update && apt install -y curl git python3 python3-venv python3-pip
+# el nodejs de apt suele quedar viejo; Node 22+ vía nodesource
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt install -y nodejs
+
+git clone https://github.com/Celiz/mgp-proxy && cd mgp-proxy
+npm install
+npm run setup:bridge   # crea bridge/.venv, instala Scrapling y baja Chromium
+npm start
+```
+
+Es la misma receta que la Opción A — no hace falta nada extra por estar en el teléfono
+(sin display, sin `xvfb`: el Turnstile se resuelve headless). Si `patchright install
+chromium` no encuentra build para la arquitectura del teléfono, la salida es instalar
+`chromium` por `apt` y apuntar el bridge a ese binario con `MGP_BRIDGE_PYTHON` +
+adaptando `bridge/bridge.py` para pasarle `executable_path` a `StealthySession` — no
+debería hacer falta si Debian arm64 sigue estando soportado, pero queda como plan B.
 
 ## ⚙️ Variables de entorno
 
@@ -117,6 +161,7 @@ probás, contribuí la receta.
 | `MGP_CHALLENGE_TIMEOUT_MS` | `90000` | Techo para resolver el Turnstile (medido: ~10s en una PC) |
 | `MGP_BRIDGE_FETCH_TIMEOUT_MS` | `15000` | Timeout de cada request a `webWS.php` vía el bridge |
 | `MGP_BRIDGE_RENEW_MS` | `540000` (9 min) | Cada cuánto renueva la sesión en segundo plano |
+| `MGP_BRIDGE_MAX_QUEUE` | `6` | Tope de requests esperando turno en el bridge antes de rechazar rápido con `bridge_busy` |
 | `MGP_RSA_PUBKEY` / `MGP_SHARED_KEY` | — | Sólo con `MGP_TRANSPORT=v670` |
 | `ALLOWED_ORIGINS` | todos | Lista separada por comas para CORS |
 

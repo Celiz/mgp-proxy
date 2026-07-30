@@ -288,17 +288,33 @@ export async function enqueueMgp(
             const message = (e as Error).message;
             const m = message.match(/(\d{3})/);
             const status = m ? Number(m[1]) : 0;
-            onError(status, message);
             recordMgp({ at: Date.now(), ok: false, status, message });
+
+            // "bridge_busy" es la cola interna del bridge rechazando de una
+            // por saturación (ver mgpBridge.ts): ni siquiera se intentó
+            // hablar con MGP, así que no es evidencia de que MGP esté
+            // fallando. Contarlo acá abriría el circuit breaker por una
+            // congestión nuestra, no de MGP.
+            if (message.startsWith("bridge_busy")) {
+                if (breakerState === "half-open") halfOpenProbeInFlight = false;
+                throw e;
+            }
+
+            onError(status, message);
             throw e;
         }
     })();
 
     // Registrar en singleflight y limpiar al resolver.
     inflight.set(body, promise);
+    // `.finally()` devuelve una promise derivada que replica el rechazo de
+    // `promise`; `promise` en sí la maneja bien quien la espera más abajo
+    // (`return promise`), pero esta copia queda huérfana sin este catch, y
+    // Node la reporta como unhandledRejection cada vez que el fetch falla
+    // (medido: bridge_timeout, circuit_open, etc.).
     promise.finally(() => {
         inflight.delete(body);
-    });
+    }).catch(() => {});
 
     return promise;
 }

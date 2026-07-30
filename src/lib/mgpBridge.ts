@@ -37,10 +37,26 @@ const RESPAWN_DELAY_MS = 2_000;
 /**
  * Renovación proactiva en segundo plano, antes de que Cloudflare la dé por
  * vencida. El approach viejo midió ~12-15 min de vigencia real; 9 min deja
- * margen. bridge.py no tira la sesión vieja hasta tener la nueva lista, así
- * que una renovación fallida no corta el servicio.
+ * margen. bridge.py cierra la sesión vieja antes de abrir la nueva (la API
+ * sync de Playwright no tolera dos sesiones abiertas a la vez en el mismo
+ * proceso), así que hay un hueco de ~10s sin servir durante la renovación.
+ * Las requests que lleguen en ese hueco quedan en la cola del bridge (ver
+ * `enqueue`) esperando su turno, no se pierden ni fallan.
  */
 const RENEW_INTERVAL_MS = Number(process.env.MGP_BRIDGE_RENEW_MS ?? 9 * 60_000);
+/** Cada cuánto reintenta la renovación si la cola está ocupada (ver `attemptRenew`). */
+const RENEW_IDLE_RETRY_MS = 5_000;
+/** Techo de espera por "no hay hueco libre": pasado esto, renueva igual. */
+const RENEW_MAX_DEFER_MS = 60_000;
+/**
+ * Tope de requests esperando turno en el bridge. Por encima de esto,
+ * `enqueue()` rechaza de una con `bridge_busy` en vez de sumarse a una fila
+ * que de todos modos va a terminar en timeout — evita que una ráfaga (o una
+ * renovación en curso) genere una cola sin techo. mgpQueue.ts no cuenta estos
+ * rechazos para el circuit breaker: no llegamos ni a intentar hablar con MGP,
+ * así que no son evidencia de que MGP esté fallando.
+ */
+const MAX_QUEUE_DEPTH = Number(process.env.MGP_BRIDGE_MAX_QUEUE ?? 6);
 
 type BridgeReply = { error?: string; [k: string]: unknown };
 
@@ -61,6 +77,8 @@ let restarts = -1;
 let lastError: string | null = null;
 let lastInitAt: number | null = null;
 let renewTimer: ReturnType<typeof setTimeout> | null = null;
+let queueDepth = 0;
+let busyRejections = 0;
 
 function log(msg: string): void {
     console.log(`[mgpBridge] ${msg}`);
@@ -134,13 +152,28 @@ function send(msg: Record<string, unknown>, timeoutMs: number): Promise<BridgeRe
 /**
  * El bridge lee stdin línea a línea de forma sincrónica: no hay pipelining.
  * Todo lo que le hablamos pasa por acá, en fila.
+ *
+ * `bypassCap` es para comandos de control (init/renovación): no deben
+ * rechazarse por cola llena, porque son justamente lo que la destraba.
  */
-function enqueue<T extends BridgeReply>(fn: () => Promise<T>): Promise<T> {
+function enqueue<T extends BridgeReply>(fn: () => Promise<T>, opts?: { bypassCap?: boolean }): Promise<T> {
+    if (!opts?.bypassCap && queueDepth >= MAX_QUEUE_DEPTH) {
+        busyRejections++;
+        return Promise.reject(new Error(`bridge_busy: cola del bridge llena (${queueDepth} esperando turno)`));
+    }
+    queueDepth++;
     const run = mutexTail.then(fn, fn);
     mutexTail = run.then(
         () => undefined,
         () => undefined,
     );
+    // `.finally()` devuelve una promise nueva que replica el rechazo de `run`.
+    // `run` ya lo maneja quien nos llama (await/try-catch más arriba); esta
+    // copia derivada no la observa nadie más, y sin el catch acá Node la
+    // reporta como unhandledRejection cada vez que `run` rechaza (medido).
+    run.finally(() => {
+        queueDepth--;
+    }).catch(() => {});
     return run;
 }
 
@@ -150,31 +183,48 @@ function enqueue<T extends BridgeReply>(fn: () => Promise<T>): Promise<T> {
 
 function scheduleRenew(): void {
     if (renewTimer) clearTimeout(renewTimer);
-    renewTimer = setTimeout(() => {
-        log("renovación proactiva en segundo plano...");
-        enqueue(() => send({ cmd: "init" }, INIT_TIMEOUT_MS))
-            .then((r) => {
-                if (r.error) throw new Error(r.error);
-                lastError = null;
-                lastInitAt = Date.now();
-                log("renovación OK");
-            })
-            .catch((e) => {
-                // No tocamos `ready`: bridge.py no tira la sesión vieja si la
-                // nueva falla, así que la anterior sigue sirviendo.
-                lastError = (e as Error).message;
-                log(`renovación falló, sigo con la sesión anterior: ${lastError}`);
-            })
-            .finally(scheduleRenew);
-    }, RENEW_INTERVAL_MS);
+    renewTimer = setTimeout(() => attemptRenew(Date.now()), RENEW_INTERVAL_MS);
     renewTimer.unref?.();
+}
+
+/**
+ * Dispara la renovación, pero evitando meterla a la fuerza en medio de una
+ * ráfaga: si hay requests esperando turno, reintenta en unos segundos en vez
+ * de sumarse a la cola ahí mismo. `dueSince` acota cuánto puede postergarse
+ * -- pasado `RENEW_MAX_DEFER_MS` renueva igual, para no dejarla esperando
+ * para siempre bajo carga sostenida.
+ */
+function attemptRenew(dueSince: number): void {
+    if (queueDepth > 0 && Date.now() - dueSince < RENEW_MAX_DEFER_MS) {
+        renewTimer = setTimeout(() => attemptRenew(dueSince), RENEW_IDLE_RETRY_MS);
+        renewTimer.unref?.();
+        return;
+    }
+    log("renovación proactiva en segundo plano...");
+    enqueue(() => send({ cmd: "init" }, INIT_TIMEOUT_MS), { bypassCap: true })
+        .then((r) => {
+            if (r.error) throw new Error(r.error);
+            lastError = null;
+            lastInitAt = Date.now();
+            log("renovación OK");
+        })
+        .catch((e) => {
+            // No forzamos `ready = false` acá: si bridge.py se quedó sin
+            // página (cerró la vieja y la nueva falló), la próxima fetch va a
+            // recibir un 503 "No page", que `pareceChallenge` ya detecta y
+            // dispara un re-init reactivo solo. No hace falta duplicar esa
+            // lógica acá.
+            lastError = (e as Error).message;
+            log(`renovación falló: ${lastError}`);
+        })
+        .finally(scheduleRenew);
 }
 
 function ensureInit(): Promise<void> {
     if (ready) return Promise.resolve();
     if (initPromise) return initPromise;
     log("inicializando (resolviendo Cloudflare)...");
-    initPromise = enqueue(() => send({ cmd: "init" }, INIT_TIMEOUT_MS))
+    initPromise = enqueue(() => send({ cmd: "init" }, INIT_TIMEOUT_MS), { bypassCap: true })
         .then((r) => {
             if (r.error) throw new Error(r.error);
             ready = true;
@@ -256,6 +306,9 @@ export function getBridgeStatus(): {
     restarts: number;
     lastInitAt: string | null;
     lastError: string | null;
+    queueDepth: number;
+    maxQueueDepth: number;
+    busyRejections: number;
 } {
     return {
         ready,
@@ -263,6 +316,9 @@ export function getBridgeStatus(): {
         restarts: Math.max(restarts, 0),
         lastInitAt: lastInitAt ? new Date(lastInitAt).toISOString() : null,
         lastError,
+        queueDepth,
+        maxQueueDepth: MAX_QUEUE_DEPTH,
+        busyRejections,
     };
 }
 
