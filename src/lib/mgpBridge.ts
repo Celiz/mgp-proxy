@@ -167,9 +167,13 @@ function enqueue<T extends BridgeReply>(fn: () => Promise<T>, opts?: { bypassCap
         () => undefined,
         () => undefined,
     );
+    // `.finally()` devuelve una promise nueva que replica el rechazo de `run`.
+    // `run` ya lo maneja quien nos llama (await/try-catch más arriba); esta
+    // copia derivada no la observa nadie más, y sin el catch acá Node la
+    // reporta como unhandledRejection cada vez que `run` rechaza (medido).
     run.finally(() => {
         queueDepth--;
-    });
+    }).catch(() => {});
     return run;
 }
 

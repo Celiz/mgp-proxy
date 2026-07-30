@@ -307,9 +307,14 @@ export async function enqueueMgp(
 
     // Registrar en singleflight y limpiar al resolver.
     inflight.set(body, promise);
+    // `.finally()` devuelve una promise derivada que replica el rechazo de
+    // `promise`; `promise` en sí la maneja bien quien la espera más abajo
+    // (`return promise`), pero esta copia queda huérfana sin este catch, y
+    // Node la reporta como unhandledRejection cada vez que el fetch falla
+    // (medido: bridge_timeout, circuit_open, etc.).
     promise.finally(() => {
         inflight.delete(body);
-    });
+    }).catch(() => {});
 
     return promise;
 }
