@@ -64,8 +64,9 @@ BODY_ARRIBOS = "accion=RecuperarProximosArribosW&identificadorParada=P3606&codig
 # cercanía al UA real, y los que la versión instalada no conozca se descartan
 # solos (tiran excepción, que el loop reporta y sigue).
 TARGETS_CHROME = [
-    "chrome136", "chrome133a", "chrome131", "chrome124", "chrome123",
-    "chrome120", "chrome119", "chrome116", "chrome110", "chrome107",
+    "chrome146", "chrome145", "chrome142", "chrome136", "chrome133a",
+    "chrome131", "chrome124", "chrome123", "chrome120", "chrome119",
+    "chrome116", "chrome110", "chrome107",
 ]
 
 # El fetch() de adentro de la página, para el control. El body va como argumento
@@ -160,8 +161,18 @@ def post_cffi(imp: str, body: str, ua: str, cookies: dict):
 def main() -> int:
     print("Resolviendo el challenge (esto tarda ~10s)...", flush=True)
     with StealthySession(headless=True, solve_cloudflare=True) as session:
-        resp = session.fetch(ENTRY_URL, network_idle=True)
-        print(f"  entry status: {resp.status}")
+        # Cloudflare a veces contesta 403 aunque Scrapling diga "captcha is
+        # solved", y a veces ni challenguea y devuelve 200 de una. Es
+        # intermitente por IP, así que se reintenta: lo único que necesita el
+        # spike es una sesión con cf_clearance, y dar por muerta la hipótesis
+        # por un 403 de entrada sería medir cualquier cosa.
+        for intento in range(1, 6):
+            resp = session.fetch(ENTRY_URL, network_idle=True)
+            hay_clearance = any(c["name"] == "cf_clearance" for c in session.context.cookies())
+            print(f"  entry status: {resp.status} (intento {intento}, cf_clearance={hay_clearance})")
+            if hay_clearance:
+                break
+            time.sleep(3)
 
         pages = session.context.pages
         if not pages:
@@ -270,6 +281,35 @@ def main() -> int:
         total_ms = (time.perf_counter() - t0) * 1000
         print(f"  {total_ms:.0f}ms las 5 juntas | {resultados}")
         print(f"  (una sola tarda {statistics.median(ms_cffi):.0f}ms; el navegador las haría en fila)")
+
+        # Si las 5 en paralelo no bajan de 5x una sola, el que serializa es PHP:
+        # session_start() toma un lock exclusivo del archivo de sesión, así que
+        # todo lo que comparta PHPSESSID se atiende de a uno igual. Vale la pena
+        # saberlo antes de rediseñar el protocolo del bridge para concurrencia.
+        sin_phpsessid = {k: v for k, v in cookies.items() if k != "PHPSESSID"}
+        print("\n[concurrencia] las mismas 5 pero sin PHPSESSID (sólo cf_clearance):")
+        t0 = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futuros = [
+                pool.submit(post_cffi, exito, BODY_ARRIBOS, ua, sin_phpsessid) for _ in range(5)
+            ]
+            resultados = []
+            for f in futuros:
+                try:
+                    r, ms = f.result()
+                    resultados.append((r.status_code, len(r.text), round(ms)))
+                except Exception as e:
+                    resultados.append((f"ERROR {type(e).__name__}", 0, 0))
+        print(f"  {(time.perf_counter() - t0) * 1000:.0f}ms las 5 juntas | {resultados}")
+        print("  (si baja mucho, el cuello era el lock de sesión de PHP, no el navegador)")
+
+        # Que ande en paralelo no sirve si sin sesión el WS contesta otra cosa.
+        # Se compara contra el control con la consulta estática, que sí trae
+        # contenido -- la de arribos puede estar vacía por el horario y haría
+        # pasar por buena una respuesta degradada.
+        r_sin, _ = post_cffi(exito, BODY_ESTATICA, ua, sin_phpsessid)
+        print(f"  sin PHPSESSID, la consulta estática: status {r_sin.status_code}, {len(r_sin.text)}b, "
+              f"idéntica al control: {r_sin.text.strip() == control['estatica']['body'].strip()}")
 
         # --- veredicto ---------------------------------------------------------
         print("\n" + "=" * 70)
