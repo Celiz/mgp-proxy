@@ -204,6 +204,16 @@ class Bridge:
         log(f"PHPSESSID: {php_sess_id}")
         return {"ok": True, "phpSessId": php_sess_id}
 
+    def _clearance_actual(self) -> str | None:
+        """El valor de cf_clearance en la sesión, si hay."""
+        try:
+            return next(
+                (c["value"] for c in self.session.context.cookies() if c["name"] == "cf_clearance"),
+                None,
+            )
+        except Exception:
+            return None
+
     def _renovar_en_caliente(self) -> dict | None:
         """
         Pide una clearance nueva sobre la sesión que ya está abierta, sin
@@ -213,16 +223,28 @@ class Bridge:
         """
         log("Renovando en caliente (sin reiniciar Chromium)...")
         t0 = time.monotonic()
+        clearance_previa = self._clearance_actual()
         try:
             resp = self.session.fetch(ENTRY_URL, network_idle=NETWORK_IDLE)
             log(f"CF status: {resp.status} en {time.monotonic() - t0:.1f}s (en caliente)")
 
             # La clearance tiene que estar sí o sí: sin eso la renovación no
             # sirvió de nada y es mejor rehacer la sesión entera.
-            cookies = self.session.context.cookies()
-            if not any(c["name"] == "cf_clearance" for c in cookies):
+            clearance = self._clearance_actual()
+            if clearance is None:
                 log("Renovación en caliente sin cf_clearance, rehago la sesión")
                 return None
+
+            # Si Cloudflare no challengeó, la cookie vuelve igual: no se renovó
+            # nada, se revalidó. No es un problema -- cuando la clearance
+            # realmente venza va a haber challenge y se resuelve acá mismo, en
+            # esta misma sesión -- pero conviene que el log no diga "renovado"
+            # cuando no pasó nada.
+            log(
+                "Clearance nueva"
+                if clearance != clearance_previa
+                else "Clearance sin cambios (CF no challengeó, sigue válida)"
+            )
 
             pages = self.session.context.pages
             if not pages:
