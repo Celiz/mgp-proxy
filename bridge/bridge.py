@@ -56,6 +56,12 @@ FAST_IMPERSONATE = os.environ.get("MGP_BRIDGE_FAST_IMPERSONATE", "").strip()
 # el timeout entero y volver como bridge_timeout.
 FAST_TIMEOUT_S = 8
 
+# Renovar la clearance sobre la sesión viva en vez de reiniciar Chromium.
+# Prendido por default; MGP_BRIDGE_HOT_RENEW=0 lo apaga sin redeployar, que en
+# este archivo ya rompió dos veces (ver c98e77a) y conviene poder desarmar
+# desde el .env del teléfono.
+HOT_RENEW = os.environ.get("MGP_BRIDGE_HOT_RENEW", "1").strip().lower() not in ("0", "false", "no", "off")
+
 
 def parece_challenge(status: int, texto: str) -> bool:
     """
@@ -82,7 +88,15 @@ def targets_impersonate() -> set:
         return set()
 
 
-def respuesta(data: dict):
+def respuesta(data: dict, msg_id=None):
+    """
+    Una línea JSON por respuesta. `msg_id` viaja de vuelta tal cual vino para
+    que el lado Node pueda aparear pedido y respuesta: sin eso, una respuesta
+    que llega después de que su fetch expiró se apareaba con el comando
+    SIGUIENTE y le devolvía datos ajenos (ver mgpBridge.ts).
+    """
+    if msg_id is not None:
+        data = {**data, "id": msg_id}
     sys.stdout.write(json.dumps(data) + "\n")
     sys.stdout.flush()
 
@@ -106,18 +120,31 @@ class Bridge:
 
     def init(self) -> dict:
         """
-        Resuelve el challenge y arma una sesión nueva.
+        Consigue una clearance nueva. Dos caminos, en este orden:
 
-        Cierra la sesión vieja ANTES de abrir la nueva -- a propósito, aunque
-        eso implique un hueco de ~10s sin servir durante una renovación. La
-        API sync de patchright/Playwright no tolera dos sesiones abiertas a
-        la vez en el mismo proceso: cada `StealthySession` sync deja su loop
-        de asyncio corriendo en segundo plano mientras está abierta, y crear
-        una segunda mientras la primera sigue viva revienta con "Playwright
-        Sync API inside the asyncio loop" (medido). Ver mgpBridge.ts, que
-        llama a este mismo comando tanto para el arranque como para la
-        renovación periódica.
+        1. Renovación en caliente sobre la sesión que ya está viva. Medido en
+           el A22 de producción, un init completo son ~20s de los cuales ~11s
+           son sólo levantar Chromium: volver a pedir el challenge sobre la
+           sesión existente se saltea esa mitad.
+        2. Si eso no trae clearance, el camino de siempre: cerrar todo y abrir
+           una sesión nueva.
+
+        Ojo con el orden del camino 2: cierra la sesión vieja ANTES de abrir
+        la nueva, a propósito, aunque eso implique un hueco sin servir. La API
+        sync de patchright/Playwright no tolera dos sesiones abiertas a la vez
+        en el mismo proceso: cada `StealthySession` sync deja su loop de
+        asyncio corriendo en segundo plano mientras está abierta, y crear una
+        segunda mientras la primera sigue viva revienta con "Playwright Sync
+        API inside the asyncio loop" (medido, ver c98e77a). La renovación en
+        caliente no cae en eso porque no abre una segunda sesión: reusa la
+        única que hay. Ver mgpBridge.ts, que llama a este mismo comando tanto
+        para el arranque como para la renovación periódica.
         """
+        if HOT_RENEW and self.session is not None:
+            renovada = self._renovar_en_caliente()
+            if renovada is not None:
+                return renovada
+
         self.close()
 
         log("Starting StealthySession...")
@@ -145,6 +172,44 @@ class Bridge:
         )
         log(f"PHPSESSID: {php_sess_id}")
         return {"ok": True, "phpSessId": php_sess_id}
+
+    def _renovar_en_caliente(self) -> dict | None:
+        """
+        Pide una clearance nueva sobre la sesión que ya está abierta, sin
+        reiniciar Chromium. Devuelve None si no salió, y ahí el que llama cae
+        al camino completo -- que es el probado, así que ante cualquier duda
+        conviene devolver None y pagar los segundos de más.
+        """
+        log("Renovando en caliente (sin reiniciar Chromium)...")
+        try:
+            resp = self.session.fetch(ENTRY_URL, network_idle=True)
+            log(f"CF status: {resp.status} (en caliente)")
+
+            # La clearance tiene que estar sí o sí: sin eso la renovación no
+            # sirvió de nada y es mejor rehacer la sesión entera.
+            cookies = self.session.context.cookies()
+            if not any(c["name"] == "cf_clearance" for c in cookies):
+                log("Renovación en caliente sin cf_clearance, rehago la sesión")
+                return None
+
+            pages = self.session.context.pages
+            if not pages:
+                log("Renovación en caliente sin páginas, rehago la sesión")
+                return None
+            self.api_page = pages[0]
+            self.api_page.goto(REFERER_URL, wait_until="domcontentloaded")
+
+            if FAST_FETCH:
+                self._capturar_credenciales()
+
+            php_sess_id = next(
+                (c["value"] for c in resp.cookies if c["name"] == "PHPSESSID"), None
+            )
+            log(f"PHPSESSID: {php_sess_id} (renovado en caliente)")
+            return {"ok": True, "phpSessId": php_sess_id, "hotRenew": True}
+        except Exception as e:
+            log(f"Renovación en caliente falló ({e}), rehago la sesión")
+            return None
 
     def _capturar_credenciales(self):
         """
@@ -346,21 +411,22 @@ def main():
             continue
 
         cmd = msg.get("cmd")
+        msg_id = msg.get("id")
         try:
             if cmd == "init":
-                respuesta(bridge.init())
+                respuesta(bridge.init(), msg_id)
             elif cmd == "fetch":
-                respuesta(bridge.fetch(msg["body"]))
+                respuesta(bridge.fetch(msg["body"]), msg_id)
             elif cmd == "shutdown":
                 log("Shutting down...")
                 bridge.close()
-                respuesta({"ok": True})
+                respuesta({"ok": True}, msg_id)
                 break
             else:
-                respuesta({"error": f"Unknown cmd: {cmd}"})
+                respuesta({"error": f"Unknown cmd: {cmd}"}, msg_id)
         except Exception as e:
             log(traceback.format_exc())
-            respuesta({"error": str(e)})
+            respuesta({"error": str(e)}, msg_id)
 
 
 if __name__ == "__main__":
