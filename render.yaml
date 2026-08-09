@@ -21,3 +21,15 @@ services:
       # el bridge queda pegado sin tener que reiniciar el servicio entero.
       - key: ADMIN_TOKEN
         generateValue: true
+      # Fast path: repetir las requests con curl_cffi en vez de pasarlas por el
+      # navegador. El spike lo validó contra producción (respuesta byte a byte
+      # idéntica al control). Ojo con qué esperar: con el bridge procesando un
+      # comando por vez esto todavía NO baja el p95 -- lo que gana hoy es poder
+      # servir durante el hueco de ~10s de cada renovación en vez de encolar.
+      # Si Cloudflare rechaza la clearance, cae solo al camino de siempre.
+      - key: MGP_BRIDGE_FAST_FETCH
+        value: "1"
+      # El que ganó el spike. Se puede sacar y lo deduce del User-Agent, pero
+      # fijarlo evita depender de qué Chromium traiga patchright en cada build.
+      - key: MGP_BRIDGE_FAST_IMPERSONATE
+        value: chrome146
