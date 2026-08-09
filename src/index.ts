@@ -6,7 +6,7 @@ import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import { enqueueMgp, getMgpQueueStats } from "./lib/mgpQueue.js";
-import { esRespuestaOk, forceReinit, getBridgeStatus } from "./lib/mgpBridge.js";
+import { esRespuestaOk, forceReinit, getBridgeStatus, waitForBridgeReady } from "./lib/mgpBridge.js";
 import { hashClient, trackQuery } from "./lib/analytics.js";
 import {
     recordAccion,
@@ -274,6 +274,23 @@ app.post("/", async (c) => {
             c.header("X-Stale-Reason", message.slice(0, 120));
             return c.json(cached.payload as Record<string, unknown>);
         }
+        // Sin caché que servir, un rechazo por `bridge_initializing` significa
+        // 502 para el usuario. Preferimos tardar: esperamos el init (acotado) y
+        // reintentamos una sola vez. Con caché no pasamos por acá, porque el
+        // stale de arriba ya respondió al instante.
+        if (message.startsWith("bridge_initializing")) {
+            try {
+                await waitForBridgeReady();
+                const data = await enqueueMgp(body, { priority: "high" });
+                if (esRespuestaOk(data)) proxyCacheSet(key, { at: Date.now(), payload: data, status: 200 });
+                recordCache("MISS");
+                trackProxyEvent(c, { accion, parada, linea, ramal, cache: "MISS", startedAt });
+                c.header("X-Cache", "MISS");
+                return c.json(data as Record<string, unknown>);
+            } catch {
+                // Sigue de largo al 502 de abajo.
+            }
+        }
         recordError("POST /", 502, message);
         trackProxyEvent(c, { accion, parada, linea, ramal, cache: "UNKNOWN", startedAt });
         return c.json({ error: "mgp_unavailable", message }, 502);
@@ -329,6 +346,24 @@ app.get("/mgp/:accion", async (c) => {
             c.header("X-Stale-Reason", message.slice(0, 120));
             c.header("Cache-Control", `public, max-age=${browserMaxAge}, s-maxage=${sMaxAge}`);
             return c.json(cached.payload as Record<string, unknown>);
+        }
+        // Sin caché que servir, un rechazo por `bridge_initializing` significa
+        // 502 para el usuario. Preferimos tardar: esperamos el init (acotado) y
+        // reintentamos una sola vez. Con caché no pasamos por acá, porque el
+        // stale de arriba ya respondió al instante.
+        if (message.startsWith("bridge_initializing")) {
+            try {
+                await waitForBridgeReady();
+                const data = await enqueueMgp(body, { priority: "high" });
+                if (esRespuestaOk(data)) proxyCacheSet(key, { at: Date.now(), payload: data, status: 200 });
+                recordCache("MISS");
+                trackProxyEvent(c, { accion, parada, linea, ramal, cache: "MISS", startedAt });
+                c.header("X-Cache", "MISS");
+                c.header("Cache-Control", `public, max-age=${browserMaxAge}, s-maxage=${sMaxAge}`);
+                return c.json(data as Record<string, unknown>);
+            } catch {
+                // Sigue de largo al 502 de abajo.
+            }
         }
         recordError(`GET /mgp/${accion}`, 502, message);
         trackProxyEvent(c, { accion, parada, linea, ramal, cache: "UNKNOWN", startedAt });
