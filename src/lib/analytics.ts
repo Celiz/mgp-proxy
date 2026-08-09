@@ -703,6 +703,117 @@ async function loadAllParadaGeo(): Promise<Map<string, GeoRow>> {
     return byCodigo;
 }
 
+// ---------------------------------------------------------------------------
+// Agregación en Postgres (ver supabase/analytics_snapshot.sql)
+// ---------------------------------------------------------------------------
+
+type RpcParada = { key: string; count: number; byHour: number[]; lineas: { linea: string; count: number }[] };
+type RpcSnapshot = {
+    total: number;
+    prevTotal: number;
+    clientes: number;
+    cache: { hit: number; miss: number; stale: number; unknown: number };
+    latencia: { p50: number | null; p95: number | null; muestras: number };
+    heatmap: { hour: number; dow: number; count: number }[];
+    paradas: RpcParada[];
+    lineas: { key: string; count: number }[];
+    ramales: { key: string; count: number }[];
+    prevParadas: Record<string, number>;
+    prevLineas: Record<string, number>;
+};
+
+/** `null` si la función no existe todavía o falla: el llamador cae al camino viejo. */
+async function fetchSnapshotRpc(
+    days: number,
+    lineaFilter: string | undefined,
+    conPrev: boolean,
+): Promise<RpcSnapshot | null> {
+    if (!supabase) return null;
+    const { data, error } = await supabase.rpc("analytics_snapshot", {
+        p_days: days,
+        p_linea: lineaFilter ?? null,
+        p_con_prev: conPrev,
+    });
+    if (error) {
+        console.warn(`[analytics] RPC analytics_snapshot no disponible (${error.message}), agrego en JS`);
+        return null;
+    }
+    return (data as RpcSnapshot) ?? null;
+}
+
+/**
+ * Convierte lo que devuelve la función SQL a la misma forma que produce
+ * `aggregateArribos`, para que el resto del snapshot no se entere de por dónde
+ * vinieron los números.
+ *
+ * Las claves se pasan igual por `normalizeParadaId`: hoy Postgres agrupa igual
+ * que el proxy (verificado, ver el .sql), pero si algún día entran códigos del
+ * rango que sí aliasea, acá se fusionan en vez de aparecer duplicados.
+ */
+function agregadoDesdeRpc(j: RpcSnapshot) {
+    const paradas = new Map<string, { count: number; lineas: Map<string, number>; byHour: number[] }>();
+    for (const p of j.paradas ?? []) {
+        const k = normalizeParadaId(p.key);
+        if (!k) continue;
+        let info = paradas.get(k);
+        if (!info) {
+            info = { count: 0, lineas: new Map(), byHour: Array(24).fill(0) };
+            paradas.set(k, info);
+        }
+        info.count += p.count;
+        for (let h = 0; h < 24; h++) info.byHour[h] = (info.byHour[h] ?? 0) + (p.byHour?.[h] ?? 0);
+        for (const l of p.lineas ?? []) info.lineas.set(l.linea, (info.lineas.get(l.linea) ?? 0) + l.count);
+    }
+
+    const topParadas: TopItem[] = [...paradas.entries()]
+        .sort((a, b) => b[1].count - a[1].count)
+        .map(([key, info]) => ({
+            key,
+            count: info.count,
+            lineas: [...info.lineas.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+                .map(([linea, count]) => ({ linea, count })),
+            nombre: paradaDisplayName(key),
+        }));
+
+    const prevParadas = new Map<string, number>();
+    for (const [k, v] of Object.entries(j.prevParadas ?? {})) {
+        const c = normalizeParadaId(k);
+        if (c) prevParadas.set(c, (prevParadas.get(c) ?? 0) + v);
+    }
+
+    const aTop = (m: Map<string, number> | Record<string, number>): TopItem[] =>
+        (m instanceof Map ? [...m.entries()] : Object.entries(m))
+            .sort((a, b) => b[1] - a[1])
+            .map(([key, count]) => ({ key, count, linea: key }));
+
+    return {
+        curr: {
+            topParadas,
+            topLineas: (j.lineas ?? []).map((l) => ({ key: l.key, count: l.count, linea: l.key })),
+            heatmap: (j.heatmap ?? []) as HeatmapCell[],
+            paradaByHour: paradas,
+            clientSet: new Set<string>(),
+            cacheMix: j.cache ?? { hit: 0, miss: 0, stale: 0, unknown: 0 },
+            durations: [] as number[],
+            ramales: new Map((j.ramales ?? []).map((r) => [r.key, r.count] as const)),
+            total: j.total ?? 0,
+            // Estos dos no se pueden reconstruir de un agregado, así que vienen
+            // ya calculados por Postgres y el ensamblado los prefiere.
+            clientesRpc: j.clientes ?? 0,
+            latenciaRpc: {
+                p50: j.latencia?.p50 ?? null,
+                p95: j.latencia?.p95 ?? null,
+                samples: j.latencia?.muestras ?? 0,
+            },
+        },
+        prev: {
+            total: j.prevTotal ?? 0,
+            topParadas: aTop(prevParadas),
+            topLineas: aTop(j.prevLineas ?? {}),
+        },
+    };
+}
+
 function aggregateArribos(data: RawEvent[]) {
     const paradaCounts = new Map<string, { count: number; lineas: Map<string, number>; byHour: number[] }>();
     const lineaCounts = new Map<string, number>();
@@ -867,8 +978,15 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
     const fetchDays = days > 0 ? (hayComparacion ? days * 2 : days) : 60;
     const allAcciones = [...TRACKED_ACCIONES];
 
+    // Camino rápido: que agregue Postgres y baje unos KB en vez de todos los
+    // eventos crudos (ver supabase/analytics_snapshot.sql). Sólo para ventanas
+    // acotadas: days=0 ("todo") agrega de otra forma y se deja como estaba.
+    // Si la función no existe todavía, `fetchSnapshotRpc` devuelve null y sigue
+    // el camino de siempre, así que el deploy no depende del orden.
+    const rpc = days > 0 ? await fetchSnapshotRpc(days, lineaFilter, hayComparacion) : null;
+
     const [arribosRaw, funnelCounts, geoMap] = await Promise.all([
-        fetchEvents(fetchDays, lineaFilter, [PRODUCT_ACCION]),
+        rpc ? Promise.resolve([] as RawEvent[]) : fetchEvents(fetchDays, lineaFilter, [PRODUCT_ACCION]),
         countAcciones(windowDays, allAcciones),
         loadAllParadaGeo(),
     ]);
@@ -896,8 +1014,11 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
     // decía "no tengo historia".
     const cmpPct = (c: number, p: number): number | null => (hayComparacion ? changePct(c, p) : null);
 
-    const curr = aggregateArribos(days > 0 ? currRaw : arribosRaw);
-    const prev = aggregateArribos(prevOnly);
+    const desdeRpc = rpc ? agregadoDesdeRpc(rpc) : null;
+    const curr = desdeRpc ? desdeRpc.curr : aggregateArribos(days > 0 ? currRaw : arribosRaw);
+    const prev = desdeRpc
+        ? (desdeRpc.prev as unknown as ReturnType<typeof aggregateArribos>)
+        : aggregateArribos(prevOnly);
     const currCompare = days > 0 ? curr : aggregateArribos(currForCompare);
 
     // change % on tops (período comparable)
@@ -966,7 +1087,9 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
     }
 
     // Uniques: prefer DB client_hash, fallback local store
-    const dbClients = curr.clientSet.size;
+    // Con el camino RPC no hay set de hashes que contar (Postgres ya devolvió
+    // el count(distinct)); con el camino viejo se cuenta el set como siempre.
+    const dbClients = desdeRpc ? desdeRpc.curr.clientesRpc : curr.clientSet.size;
     const localClients = clientsInDays(days > 0 ? days : 30);
     const clientsApprox = Math.max(dbClients, localClients);
 
@@ -993,7 +1116,7 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
         .slice(0, 15)
         .map(([key, count]) => ({ key, count }));
 
-    const totalEvents = days > 0 ? currRaw.length : curr.total || arribosRaw.length;
+    const totalEvents = desdeRpc ? curr.total : days > 0 ? currRaw.length : curr.total || arribosRaw.length;
     const prevTotalEvents = prev.total;
     const totalForDelta = days > 0 ? totalEvents : currCompare.total;
     const durationMs = Date.now() - t0;
@@ -1018,11 +1141,13 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
                   : "Aún sin client_id/hash — el app puede mandar X-Client-Id",
         },
         cacheMix: finalCache,
-        latency: {
-            p50: percentile(durSrc, 50),
-            p95: percentile(durSrc, 95),
-            samples: durSrc.length,
-        },
+        latency: desdeRpc
+            ? desdeRpc.curr.latenciaRpc
+            : {
+                  p50: percentile(durSrc, 50),
+                  p95: percentile(durSrc, 95),
+                  samples: durSrc.length,
+              },
         topRamales,
         bufferSize: buffer.length,
         supabaseConnected: true,
@@ -1042,7 +1167,7 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
         topParadas.length > 0 ? Math.round((paradaGeo.length / topParadas.length) * 100) : 0;
 
     snapshotCache.set(cacheKey, { at: Date.now(), data });
-    console.log(`[analytics] snapshot days=${days} in ${durationMs}ms (events=${totalEvents})`);
+    console.log(`[analytics] snapshot days=${days} in ${durationMs}ms (events=${totalEvents}, via=${desdeRpc ? "postgres" : "js"})`);
     return data;
 }
 
