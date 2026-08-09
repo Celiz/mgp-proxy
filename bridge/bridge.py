@@ -28,6 +28,7 @@ respuesta antes de mandar el siguiente comando (lo serializa mgpBridge.ts).
 """
 
 import os
+import time
 import re
 import sys
 import json
@@ -61,6 +62,16 @@ FAST_TIMEOUT_S = 8
 # este archivo ya rompió dos veces (ver c98e77a) y conviene poder desarmar
 # desde el .env del teléfono.
 HOT_RENEW = os.environ.get("MGP_BRIDGE_HOT_RENEW", "1").strip().lower() not in ("0", "false", "no", "off")
+
+# Esperar a que la red quede quieta al pedir el challenge. Sospechoso número uno
+# del tail: en el A22 se midió un hueco de 61s ENTRE "Cloudflare captcha is
+# solved" y el "Fetched" siguiente, sin una sola línea de log en el medio, y 61s
+# es sospechosamente 2 x los 30s de timeout de networkidle (la 307 y la 200).
+# El p95 de producción es 60.982ms. Queda en el comportamiento de siempre por
+# default porque no está confirmado que la cookie llegue igual sin esto;
+# MGP_BRIDGE_NETWORK_IDLE=0 lo apaga para comparar contra los tiempos que ahora
+# loguea init().
+NETWORK_IDLE = os.environ.get("MGP_BRIDGE_NETWORK_IDLE", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
 def parece_challenge(status: int, texto: str) -> bool:
@@ -122,12 +133,17 @@ class Bridge:
         """
         Consigue una clearance nueva. Dos caminos, en este orden:
 
-        1. Renovación en caliente sobre la sesión que ya está viva. Medido en
-           el A22 de producción, un init completo son ~20s de los cuales ~11s
-           son sólo levantar Chromium: volver a pedir el challenge sobre la
-           sesión existente se saltea esa mitad.
+        1. Renovación en caliente sobre la sesión que ya está viva, que se
+           saltea el arranque de Chromium (~11s medidos en el A22).
         2. Si eso no trae clearance, el camino de siempre: cerrar todo y abrir
            una sesión nueva.
+
+        Ojo con las proporciones: en el A22 se midió un init de 81s, del cual
+        el arranque son ~11s y resolver el Turnstile ~9s. Los ~61s restantes se
+        van adentro del fetch de ENTRY_URL DESPUÉS de que el captcha ya está
+        resuelto -- ver NETWORK_IDLE, que es el sospechoso. O sea que esta
+        renovación en caliente ayuda, pero el grueso del tiempo está en otro
+        lado; por eso el desglose se loguea abajo.
 
         Ojo con el orden del camino 2: cierra la sesión vieja ANTES de abrir
         la nueva, a propósito, aunque eso implique un hueco sin servir. La API
@@ -147,20 +163,35 @@ class Bridge:
 
         self.close()
 
+        t0 = time.monotonic()
         log("Starting StealthySession...")
         self.session = StealthySession.__enter__(
             StealthySession(headless=True, solve_cloudflare=True)
         )
+        t_arranque = time.monotonic() - t0
 
         log("Solving CF...")
-        resp = self.session.fetch(ENTRY_URL, network_idle=True)
+        t1 = time.monotonic()
+        resp = self.session.fetch(ENTRY_URL, network_idle=NETWORK_IDLE)
+        t_challenge = time.monotonic() - t1
         log(f"CF status: {resp.status}")
 
+        t2 = time.monotonic()
         pages = self.session.context.pages
         if pages:
             self.api_page = pages[0]
             self.api_page.goto(REFERER_URL, wait_until="domcontentloaded")
             log(f"Page: {self.api_page.url}")
+        t_referer = time.monotonic() - t2
+
+        # Desglose para saber dónde se va el tiempo sin tener que leer el reloj
+        # de las líneas de Scrapling. Medido en el A22: el challenge se resolvía
+        # en ~9s pero este tramo tardaba ~70s (ver NETWORK_IDLE).
+        log(
+            f"init: arranque {t_arranque:.1f}s + challenge {t_challenge:.1f}s + "
+            f"referer {t_referer:.1f}s = {time.monotonic() - t0:.1f}s "
+            f"(network_idle={NETWORK_IDLE})"
+        )
 
         # El fast path necesita las credenciales de esta sesión nueva. Se
         # capturan sólo con el flag prendido: apagado, init() es el de siempre.
@@ -181,9 +212,10 @@ class Bridge:
         conviene devolver None y pagar los segundos de más.
         """
         log("Renovando en caliente (sin reiniciar Chromium)...")
+        t0 = time.monotonic()
         try:
-            resp = self.session.fetch(ENTRY_URL, network_idle=True)
-            log(f"CF status: {resp.status} (en caliente)")
+            resp = self.session.fetch(ENTRY_URL, network_idle=NETWORK_IDLE)
+            log(f"CF status: {resp.status} en {time.monotonic() - t0:.1f}s (en caliente)")
 
             # La clearance tiene que estar sí o sí: sin eso la renovación no
             # sirvió de nada y es mejor rehacer la sesión entera.
