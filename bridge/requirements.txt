@@ -1,1 +1,7 @@
 scrapling[fetchers]==0.4.12
+# Fast path del bridge (MGP_BRIDGE_FAST_FETCH) y spike_curl_cffi.py: repite las
+# requests fuera del navegador imitando el fingerprint TLS/HTTP2 de Chrome.
+# Scrapling ya lo arrastra como dependencia transitiva; queda explícito porque
+# bridge.py lo importa. Sin techo de versión para no pelearse con el pin de
+# scrapling; >=0.7 por el alias impersonate="chrome" y los targets recientes.
+curl_cffi>=0.7
