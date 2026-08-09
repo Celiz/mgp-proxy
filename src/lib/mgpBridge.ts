@@ -106,6 +106,18 @@ let lastInitAt: number | null = null;
 let renewTimer: ReturnType<typeof setTimeout> | null = null;
 /** Hay una renovación proactiva ocupando el mutex del bridge (ver `attemptRenew`). */
 let renewing = false;
+/**
+ * El próximo init tiene que rehacer la sesión de verdad, no alcanza con renovar
+ * en caliente.
+ *
+ * Se prende cuando nos re-inicializamos porque Cloudflare nos rechazó. Visto en
+ * producción: webWS.php devolvía 403, pero el re-fetch de la entrada contestaba
+ * 200 sin challenge (la clearance seguía valiendo para esa URL), así que la
+ * renovación en caliente se daba por buena, el fast path se reactivaba con la
+ * misma cookie rechazada y volvía el 403 -- en loop. bridge.py lo recibe como
+ * `force` y ahí exige que la clearance realmente cambie.
+ */
+let forceNextInit = false;
 let queueDepth = 0;
 let busyRejections = 0;
 
@@ -267,8 +279,10 @@ function attemptRenew(dueSince: number): void {
 function ensureInit(): Promise<void> {
     if (ready) return Promise.resolve();
     if (initPromise) return initPromise;
-    log("inicializando (resolviendo Cloudflare)...");
-    initPromise = enqueue(() => send({ cmd: "init" }, INIT_TIMEOUT_MS), { bypassCap: true })
+    const force = forceNextInit;
+    forceNextInit = false;
+    log(`inicializando (resolviendo Cloudflare)${force ? ", forzando sesión nueva" : ""}...`);
+    initPromise = enqueue(() => send({ cmd: "init", force }, INIT_TIMEOUT_MS), { bypassCap: true })
         .then((r) => {
             if (r.error) throw new Error(r.error);
             ready = true;
@@ -292,6 +306,7 @@ function ensureInit(): Promise<void> {
 /** Fuerza un re-init (p.ej. desde /admin/bridge/restart si queda pegado). */
 export function forceReinit(): Promise<void> {
     ready = false;
+    forceNextInit = true;
     return ensureInit();
 }
 
@@ -347,6 +362,10 @@ export async function fetchMgpBridge(body: string): Promise<unknown> {
     if (pareceChallenge(status, text)) {
         log(`challenge/HTTP ${status} en webWS.php, disparando re-init en segundo plano`);
         ready = false;
+        // Nos rechazaron: la sesión hay que rehacerla de verdad. Sin esto, la
+        // renovación en caliente devolvía la misma clearance, se daba por
+        // buena, y volvíamos a comer 403 en loop (visto en producción).
+        forceNextInit = true;
         ensureInit().catch(() => {});
         throw new Error("bridge_initializing: challenge en webWS.php, sirvo stale");
     }

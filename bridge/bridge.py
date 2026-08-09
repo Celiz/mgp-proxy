@@ -129,7 +129,7 @@ class Bridge:
         # init que capture credenciales nuevas.
         self.fast_stale = False
 
-    def init(self) -> dict:
+    def init(self, forzado: bool = False) -> dict:
         """
         Consigue una clearance nueva. Dos caminos, en este orden:
 
@@ -157,7 +157,7 @@ class Bridge:
         para el arranque como para la renovación periódica.
         """
         if HOT_RENEW and self.session is not None:
-            renovada = self._renovar_en_caliente()
+            renovada = self._renovar_en_caliente(exigir_nueva=forzado)
             if renovada is not None:
                 return renovada
 
@@ -214,12 +214,20 @@ class Bridge:
         except Exception:
             return None
 
-    def _renovar_en_caliente(self) -> dict | None:
+    def _renovar_en_caliente(self, exigir_nueva: bool = False) -> dict | None:
         """
         Pide una clearance nueva sobre la sesión que ya está abierta, sin
         reiniciar Chromium. Devuelve None si no salió, y ahí el que llama cae
         al camino completo -- que es el probado, así que ante cualquier duda
         conviene devolver None y pagar los segundos de más.
+
+        `exigir_nueva` es para los re-init disparados por un challenge. Visto en
+        producción: Cloudflare rechazaba webWS.php con 403, pero al re-pedir
+        ENTRY_URL contestaba 200 sin challenge -- la clearance seguía valiendo
+        para esa URL. Sin esta bandera dábamos la renovación por buena, se
+        reactivaba el fast path con la MISMA cookie rechazada, volvía el 403, y
+        así en loop. Si nos re-inicializamos porque nos rechazaron, una
+        clearance que no cambió no arregló nada: hay que rehacer la sesión.
         """
         log("Renovando en caliente (sin reiniciar Chromium)...")
         t0 = time.monotonic()
@@ -240,11 +248,13 @@ class Bridge:
             # realmente venza va a haber challenge y se resuelve acá mismo, en
             # esta misma sesión -- pero conviene que el log no diga "renovado"
             # cuando no pasó nada.
-            log(
-                "Clearance nueva"
-                if clearance != clearance_previa
-                else "Clearance sin cambios (CF no challengeó, sigue válida)"
-            )
+            if clearance != clearance_previa:
+                log("Clearance nueva")
+            elif exigir_nueva:
+                log("Clearance sin cambios pero nos habían rechazado, rehago la sesión")
+                return None
+            else:
+                log("Clearance sin cambios (CF no challengeó, sigue válida)")
 
             pages = self.session.context.pages
             if not pages:
@@ -468,7 +478,7 @@ def main():
         msg_id = msg.get("id")
         try:
             if cmd == "init":
-                respuesta(bridge.init(), msg_id)
+                respuesta(bridge.init(bool(msg.get("force"))), msg_id)
             elif cmd == "fetch":
                 respuesta(bridge.fetch(msg["body"]), msg_id)
             elif cmd == "shutdown":
