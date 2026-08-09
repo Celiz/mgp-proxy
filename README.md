@@ -74,6 +74,39 @@ Ver `src/lib/mgpBridge.ts` (el lado Node: spawn del subproceso, cola de comandos
 renovación, tope de cola) y `bridge/bridge.py` (el lado Python: Scrapling + la llamada
 real).
 
+### Fast path con `curl_cffi` (experimental, apagado por default)
+
+Esa serialización es hoy el cuello de botella real: medido en producción sobre 30 días,
+el p50 está en ~570 ms pero el p95 en ~61 s, y el 25 % de las requests termina en 502
+(mayormente `circuit_open` detrás de `bridge_busy`). MGP no es el problema — su okRate es
+93,6 % y nunca devolvió 429.
+
+La hipótesis del fast path: el navegador es imprescindible para **resolver** el Turnstile,
+pero no para **usar** el resultado. Con `MGP_BRIDGE_FAST_FETCH=1`, después de cada init el
+bridge guarda las cookies (`cf_clearance` + `PHPSESSID`) y el User-Agent reales, y repite
+las requests con [`curl_cffi`](https://github.com/lexiforest/curl_cffi), que imita el
+fingerprint TLS/HTTP2 de Chrome. Eso ataca justo la objeción que descartaba reusar la
+cookie con `fetch()` de Node (que Turnstile valide más señales que la cookie sola), y saca
+cada request del navegador, que es lo que las serializa.
+
+La red de seguridad no es opcional: si `curl_cffi` recibe 403/503 o el HTML de "Just a
+moment", esa request **cae al camino de siempre** (`page.evaluate`) y el fast path queda
+apagado hasta el próximo init, que lo vuelve a prender con credenciales frescas. Si
+Cloudflare invalida la clearance se pierde velocidad, nunca capacidad. Un error de red
+transitorio también cae al navegador, pero sin apagar el atajo.
+
+Antes de prenderlo en producción hay que correr `bridge/spike_curl_cffi.py`, que resuelve
+el challenge una vez y compara la misma consulta por los dos caminos (más latencia y una
+prueba de 5 requests en paralelo). El `impersonate` que gane el spike va en
+`MGP_BRIDGE_FAST_IMPERSONATE`:
+
+```bash
+bridge/.venv/bin/python bridge/spike_curl_cffi.py
+```
+
+Con el flag apagado (el default) `bridge.py` se comporta exactamente como antes: no
+captura credenciales en el init ni importa nada del fast path.
+
 ## 🚀 Formas de desplegarlo
 
 ### A. PC / servidor Linux
@@ -162,6 +195,8 @@ debería hacer falta si Debian arm64 sigue estando soportado, pero queda como pl
 | `MGP_BRIDGE_FETCH_TIMEOUT_MS` | `15000` | Timeout de cada request a `webWS.php` vía el bridge |
 | `MGP_BRIDGE_RENEW_MS` | `540000` (9 min) | Cada cuánto renueva la sesión en segundo plano |
 | `MGP_BRIDGE_MAX_QUEUE` | `6` | Tope de requests esperando turno en el bridge antes de rechazar rápido con `bridge_busy` |
+| `MGP_BRIDGE_FAST_FETCH` | apagado | Fast path experimental: repite las requests con `curl_cffi` en vez de pasarlas por el navegador. Prender con `1`/`true`. Ante un challenge cae solo al camino de siempre |
+| `MGP_BRIDGE_FAST_IMPERSONATE` | auto | Qué Chrome imita `curl_cffi` (`chrome131`, `chrome124`, …). Por defecto lo deduce del User-Agent real; usar el que gane `bridge/spike_curl_cffi.py` |
 | `MGP_RSA_PUBKEY` / `MGP_SHARED_KEY` | — | Sólo con `MGP_TRANSPORT=v670` |
 | `ALLOWED_ORIGINS` | todos | Lista separada por comas para CORS |
 
