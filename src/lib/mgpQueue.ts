@@ -295,7 +295,14 @@ export async function enqueueMgp(
             // hablar con MGP, así que no es evidencia de que MGP esté
             // fallando. Contarlo acá abriría el circuit breaker por una
             // congestión nuestra, no de MGP.
-            if (message.startsWith("bridge_busy")) {
+            //
+            // "bridge_initializing" es lo mismo pero por el otro lado: el
+            // bridge está resolviendo el challenge de Cloudflare en segundo
+            // plano y rechaza rápido para que index.ts sirva stale en vez de
+            // dejar al usuario esperando ~20s. Tampoco llegamos a hablar con
+            // MGP, así que tampoco dice nada sobre su salud -- y como pasa en
+            // cada renovación, contarlo abriría el breaker cada 9 minutos.
+            if (message.startsWith("bridge_busy") || message.startsWith("bridge_initializing")) {
                 if (breakerState === "half-open") halfOpenProbeInFlight = false;
                 throw e;
             }
