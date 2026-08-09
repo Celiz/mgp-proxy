@@ -66,17 +66,46 @@ type BridgeReply = { error?: string; [k: string]: unknown };
 
 let proc: ChildProcess | null = null;
 let rl: Interface | null = null;
-let pendingResolve: ((v: BridgeReply) => void) | null = null;
-let pendingReject: ((e: Error) => void) | null = null;
-let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Comandos esperando respuesta, por id.
+ *
+ * Antes había un solo `pendingResolve` global, y ahí estaba el problema: al
+ * vencer el timeout de un fetch lo limpiábamos y rechazábamos, pero el comando
+ * ya había salido por stdin y el bridge iba a contestar igual. Esa respuesta
+ * tardía llegaba cuando ya había OTRO comando esperando, y resolvía ese —
+ * cada request se quedaba con los datos de la anterior. Si le tocaba la
+ * respuesta de un `init` (`{ok, phpSessId}`, sin campo `status`), abajo daba
+ * `webWS.php devolvió 0`: 369 de esos en 30 días, y como sí cuentan para el
+ * breaker, cada timeout se multiplicaba en una ráfaga de `circuit_open`.
+ *
+ * Con el id, una respuesta cuyo comando ya expiró no encuentra a nadie y se
+ * descarta, que es lo correcto.
+ */
+type Pending = {
+    resolve: (v: BridgeReply) => void;
+    reject: (e: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+};
+const pending = new Map<number, Pending>();
+let nextCmdId = 0;
 let mutexTail: Promise<unknown> = Promise.resolve();
 
 let ready = false;
+/**
+ * ¿El bridge llegó a estar listo alguna vez desde que arrancó el proceso?
+ *
+ * Distingue el arranque en frío (hay que esperar el challenge sí o sí, no hay
+ * caché ni nada que servir) de una renovación (ya hubo tráfico, así que
+ * conviene contestar stale al toque en vez de hacer esperar 20s).
+ */
+let everReady = false;
 let initPromise: Promise<void> | null = null;
 let restarts = -1;
 let lastError: string | null = null;
 let lastInitAt: number | null = null;
 let renewTimer: ReturnType<typeof setTimeout> | null = null;
+/** Hay una renovación proactiva ocupando el mutex del bridge (ver `attemptRenew`). */
+let renewing = false;
 let queueDepth = 0;
 let busyRejections = 0;
 
@@ -85,15 +114,12 @@ function log(msg: string): void {
 }
 
 function onDisconnect(reason: string): void {
-    if (pendingReject) {
-        const reject = pendingReject;
-        pendingResolve = null;
-        pendingReject = null;
-        if (pendingTimer) {
-            clearTimeout(pendingTimer);
-            pendingTimer = null;
-        }
-        reject(new Error(`bridge_disconnected: ${reason}`));
+    // Si el subproceso se cayó, ninguno de los comandos en vuelo va a tener
+    // respuesta nunca: se rechazan todos en vez de dejarlos hasta su timeout.
+    for (const [id, p] of pending) {
+        clearTimeout(p.timer);
+        pending.delete(id);
+        p.reject(new Error(`bridge_disconnected: ${reason}`));
     }
     ready = false;
     rl?.close();
@@ -118,16 +144,25 @@ function spawnProcess(): void {
             log(`línea no-JSON del bridge, ignorada: ${trimmed}`);
             return;
         }
-        if (pendingResolve) {
-            const resolve = pendingResolve;
-            pendingResolve = null;
-            pendingReject = null;
-            if (pendingTimer) {
-                clearTimeout(pendingTimer);
-                pendingTimer = null;
-            }
-            resolve(data);
+        const id = typeof data.id === "number" ? data.id : null;
+        if (id === null) {
+            // Sólo puede pasar si el bridge no pudo ni parsear el comando y no
+            // supo a qué id contestar. Sin id no hay forma de aparearla sin
+            // arriesgarse a dársela al comando equivocado, así que se descarta
+            // y el que la esperaba cae por timeout.
+            log(`respuesta del bridge sin id, descartada: ${trimmed.slice(0, 120)}`);
+            return;
         }
+        const p = pending.get(id);
+        if (!p) {
+            // La respuesta llegó después de que su comando expiró. Descartarla
+            // acá es justamente lo que evita que contamine al siguiente.
+            log(`respuesta tardía del bridge (id=${id}), descartada`);
+            return;
+        }
+        pending.delete(id);
+        clearTimeout(p.timer);
+        p.resolve(data);
     });
     p.stderr?.on("data", (d) => console.log(`[bridge] ${String(d).trimEnd()}`));
     p.on("error", (err) => onDisconnect(`spawn error: ${err.message}`));
@@ -137,15 +172,15 @@ function spawnProcess(): void {
 function send(msg: Record<string, unknown>, timeoutMs: number): Promise<BridgeReply> {
     return new Promise((resolve, reject) => {
         if (!proc?.stdin) return reject(new Error("bridge_no_process"));
-        pendingResolve = resolve;
-        pendingReject = reject;
-        pendingTimer = setTimeout(() => {
-            pendingResolve = null;
-            pendingReject = null;
-            pendingTimer = null;
+        const id = ++nextCmdId;
+        const timer = setTimeout(() => {
+            // Se saca del mapa antes de rechazar: si el bridge contesta más
+            // tarde, esa respuesta ya no encuentra a nadie y se descarta sola.
+            pending.delete(id);
             reject(new Error("bridge_timeout"));
         }, timeoutMs);
-        proc.stdin.write(JSON.stringify(msg) + "\n");
+        pending.set(id, { resolve, reject, timer });
+        proc.stdin.write(JSON.stringify({ ...msg, id }) + "\n");
     });
 }
 
@@ -201,6 +236,12 @@ function attemptRenew(dueSince: number): void {
         return;
     }
     log("renovación proactiva en segundo plano...");
+    // `ready` queda en true durante la renovación (la sesión vieja sigue
+    // sirviendo hasta que la nueva esté), así que hace falta esta bandera
+    // aparte para que `fetchMgpBridge` sepa que hay un init ocupando el mutex
+    // y conteste stale en vez de encolarse detrás. Es el caso más común de
+    // todos: pasa cada MGP_BRIDGE_RENEW_MS.
+    renewing = true;
     enqueue(() => send({ cmd: "init" }, INIT_TIMEOUT_MS), { bypassCap: true })
         .then((r) => {
             if (r.error) throw new Error(r.error);
@@ -217,7 +258,10 @@ function attemptRenew(dueSince: number): void {
             lastError = (e as Error).message;
             log(`renovación falló: ${lastError}`);
         })
-        .finally(scheduleRenew);
+        .finally(() => {
+            renewing = false;
+            scheduleRenew();
+        });
 }
 
 function ensureInit(): Promise<void> {
@@ -228,9 +272,10 @@ function ensureInit(): Promise<void> {
         .then((r) => {
             if (r.error) throw new Error(r.error);
             ready = true;
+            everReady = true;
             lastError = null;
             lastInitAt = Date.now();
-            log(`listo (phpSessId=${r.phpSessId ?? "?"})`);
+            log(`listo (phpSessId=${r.phpSessId ?? "?"}${r.hotRenew ? ", en caliente" : ""})`);
             scheduleRenew();
         })
         .catch((e) => {
@@ -269,24 +314,41 @@ export function isMgpBridgeEnabled(): boolean {
  * web es el mismo que ya habla el frontend, así que no hay traducción.
  */
 export async function fetchMgpBridge(body: string): Promise<unknown> {
-    await ensureInit();
+    // Resolver el challenge cuesta ~20s en el A22 de producción (~11s de
+    // arrancar Chromium + ~9s de Turnstile), y hasta ahora ese costo lo pagaba
+    // el usuario: `await ensureInit()` acá adentro, con techo de 90s. En el log
+    // de producción se ven dos requests de 21s y 9s esperando el mismo init, y
+    // el p99 de 85.974ms contra un INIT_TIMEOUT_MS de 90.000 no es casualidad.
+    //
+    // Ahora sólo se espera cuando no hay alternativa: en el arranque en frío,
+    // donde no existe ni caché para servir. Si el bridge ya sirvió alguna vez,
+    // el re-init arranca en segundo plano y esta request se rechaza al toque
+    // con `bridge_initializing` -- que mgpQueue.ts no cuenta para el breaker, y
+    // que hace que index.ts conteste con caché stale en vez de colgar al
+    // usuario 20s.
+    if (!ready || renewing) {
+        if (!everReady) {
+            await ensureInit();
+        } else {
+            if (!renewing) ensureInit().catch(() => {});
+            throw new Error("bridge_initializing: renovando la sesión, sirvo stale");
+        }
+    }
 
-    let result = await enqueue(() => send({ cmd: "fetch", body }, FETCH_TIMEOUT_MS));
+    const result = await enqueue(() => send({ cmd: "fetch", body }, FETCH_TIMEOUT_MS));
     if (result.error) throw new Error(`bridge_error: ${result.error}`);
 
-    let status = Number(result.status ?? 0);
-    let text = String(result.body ?? "");
+    const status = Number(result.status ?? 0);
+    const text = String(result.body ?? "");
 
-    // Un challenge acá significa sesión vencida/rechazada: forzamos un re-init
-    // y reintentamos una sola vez.
+    // Un challenge acá significa sesión vencida/rechazada. Se dispara el
+    // re-init en segundo plano y se corta: reintentar en línea significaba
+    // sumarle a esta misma request los ~20s del challenge más otro fetch.
     if (pareceChallenge(status, text)) {
-        log(`challenge/HTTP ${status} en webWS.php, forzando re-init`);
+        log(`challenge/HTTP ${status} en webWS.php, disparando re-init en segundo plano`);
         ready = false;
-        await ensureInit();
-        result = await enqueue(() => send({ cmd: "fetch", body }, FETCH_TIMEOUT_MS));
-        if (result.error) throw new Error(`bridge_error: ${result.error}`);
-        status = Number(result.status ?? 0);
-        text = String(result.body ?? "");
+        ensureInit().catch(() => {});
+        throw new Error("bridge_initializing: challenge en webWS.php, sirvo stale");
     }
 
     if (status === 429) throw new Error("webWS.php devolvió 429");

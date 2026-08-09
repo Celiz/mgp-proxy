@@ -51,11 +51,26 @@ Node (proxy)  ◄──stdin/stdout, JSON por línea──►  bridge/bridge.py 
 
 El bridge es un subproceso Python de larga vida (`bridge/bridge.py`) que el proxy
 arranca solo. Mantiene una sesión de navegador viva y la renueva en segundo plano cada
-~9 minutos (configurable con `MGP_BRIDGE_RENEW_MS`). Cada renovación cierra la sesión
-vieja y abre una nueva (~10s) — la API sync de Playwright/patchright no permite tener
-dos sesiones abiertas a la vez en el mismo proceso — pero eso no tira requests: quedan
-en la cola del bridge esperando su turno. Si una respuesta huele a challenge (403/503 o
-HTML de "Just a moment"), fuerza un re-init y reintenta una vez.
+~9 minutos (configurable con `MGP_BRIDGE_RENEW_MS`).
+
+La renovación intenta primero **en caliente**: le vuelve a pedir el challenge a la sesión
+que ya está abierta, sin reiniciar Chromium. Medido en el A22 de producción, un init
+completo son ~20s de los cuales ~11s son sólo levantar el navegador, así que saltearse
+eso es más de la mitad del costo. Si la renovación en caliente no devuelve `cf_clearance`
+(o falla), cae al camino completo: cerrar la sesión y abrir una nueva. Ese orden —cerrar
+antes de abrir— es a propósito: la API sync de Playwright/patchright no tolera dos
+sesiones abiertas a la vez en el mismo proceso. La renovación en caliente no cae en eso
+porque no abre una segunda sesión, reusa la única que hay. Se puede desactivar con
+`MGP_BRIDGE_HOT_RENEW=0`.
+
+**Mientras haya un init en curso, las requests no esperan.** Antes se encolaban detrás y
+el usuario pagaba los ~20s del challenge (en producción se midieron requests de 21s, y un
+p99 de 85.974 ms contra un `MGP_CHALLENGE_TIMEOUT_MS` de 90.000 que no era casualidad).
+Ahora se rechazan al toque con `bridge_initializing`, que `mgpQueue.ts` no cuenta para el
+circuit breaker y que hace que se sirva caché stale. La única excepción es el arranque en
+frío, donde no hay nada que servir y sí se espera. Lo mismo si una respuesta huele a
+challenge (403/503 o HTML de "Just a moment"): dispara el re-init en segundo plano en vez
+de reintentar en línea.
 
 Como el bridge sólo procesa un comando por vez (no hay pipelining), toda request pasa
 por una cola FIFO. Tres cosas la protegen para que una renovación o una ráfaga no
@@ -194,6 +209,7 @@ debería hacer falta si Debian arm64 sigue estando soportado, pero queda como pl
 | `MGP_CHALLENGE_TIMEOUT_MS` | `90000` | Techo para resolver el Turnstile (medido: ~10s en una PC) |
 | `MGP_BRIDGE_FETCH_TIMEOUT_MS` | `15000` | Timeout de cada request a `webWS.php` vía el bridge |
 | `MGP_BRIDGE_RENEW_MS` | `540000` (9 min) | Cada cuánto renueva la sesión en segundo plano |
+| `MGP_BRIDGE_HOT_RENEW` | `1` (prendido) | Renovar la clearance sobre la sesión viva en vez de reiniciar Chromium. `0` lo apaga y vuelve al camino completo |
 | `MGP_BRIDGE_MAX_QUEUE` | `6` | Tope de requests esperando turno en el bridge antes de rechazar rápido con `bridge_busy` |
 | `MGP_BRIDGE_FAST_FETCH` | apagado | Fast path experimental: repite las requests con `curl_cffi` en vez de pasarlas por el navegador. Prender con `1`/`true`. Ante un challenge cae solo al camino de siempre |
 | `MGP_BRIDGE_FAST_IMPERSONATE` | auto | Qué Chrome imita `curl_cffi` (`chrome131`, `chrome124`, …). Por defecto lo deduce del User-Agent real; usar el que gane `bridge/spike_curl_cffi.py` |
