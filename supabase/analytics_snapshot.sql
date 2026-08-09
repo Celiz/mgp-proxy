@@ -9,6 +9,14 @@
 -- que el costo no era buscar sino transferir. Esta función devuelve el mismo
 -- agregado en unos pocos KB.
 --
+-- OJO con cómo está escrita: la primera versión usaba subqueries correlacionadas
+-- para armar byHour y las líneas de cada parada, o sea que se ejecutaban 500
+-- veces (una por parada) y cada una recorría entera la CTE de horas. Medido:
+-- 33,8s para 7 días, peor que agregar en JavaScript. Todo lo de acá abajo está
+-- escrito para que cada CTE se recorra UNA vez: los conteos por hora salen
+-- pivoteados con FILTER en un solo group by, las líneas con un group by sobre
+-- la ventana, y el ensamblado final es un join, no una correlación.
+--
 -- Sobre agrupar por codigo_parada: el proxy canonicaliza los ids de parada con
 -- un mapa estático (Codigo -> Identificador). Verificado que acá no hace falta
 -- replicarlo: los Codigo que aliasean van de 15010 a 74362 y los numéricos que
@@ -53,30 +61,67 @@ base as (
       and e.ts >= l.desde_total
       and (p_linea is null or e.linea = p_linea)
 ),
-cur as (select * from base where es_curr),
+cur  as (select * from base where es_curr),
 prev as (select * from base where not es_curr),
 
--- Top paradas del período actual. El resto de los agregados por parada se
--- calculan sólo para estas, que son las únicas que el dashboard muestra.
+-- Todos los escalares del período actual en UNA sola pasada.
+tot as (
+    select
+        count(*)::int                                                        as total,
+        count(distinct client_hash)::int                                     as clientes,
+        (count(*) filter (where cache_status = 'HIT'))::int                  as hit,
+        (count(*) filter (where cache_status = 'MISS'))::int                 as miss,
+        (count(*) filter (where cache_status = 'STALE'))::int                as stale,
+        (count(*) filter (where cache_status not in ('HIT','MISS','STALE')))::int as unknown,
+        percentile_cont(0.5)  within group (order by duration_ms)            as p50,
+        percentile_cont(0.95) within group (order by duration_ms)            as p95,
+        count(duration_ms)::int                                              as muestras
+    from cur
+),
+
 p_top as (
     select codigo_parada as key, count(*)::int as cnt
     from cur where codigo_parada is not null
     group by 1 order by 2 desc limit 500
 ),
-p_hora as (
-    select c.codigo_parada as key, c.hora, count(*)::int as cnt
-    from cur c join p_top t on t.key = c.codigo_parada
-    group by 1, 2
+-- byHour pivoteado con FILTER: un group by, 24 contadores, una sola pasada.
+p_arr as (
+    select
+        c.codigo_parada as key,
+        count(*)::int as cnt,
+        jsonb_build_array(
+            (count(*) filter (where c.hora = 0))::int,  (count(*) filter (where c.hora = 1))::int,
+            (count(*) filter (where c.hora = 2))::int,  (count(*) filter (where c.hora = 3))::int,
+            (count(*) filter (where c.hora = 4))::int,  (count(*) filter (where c.hora = 5))::int,
+            (count(*) filter (where c.hora = 6))::int,  (count(*) filter (where c.hora = 7))::int,
+            (count(*) filter (where c.hora = 8))::int,  (count(*) filter (where c.hora = 9))::int,
+            (count(*) filter (where c.hora = 10))::int, (count(*) filter (where c.hora = 11))::int,
+            (count(*) filter (where c.hora = 12))::int, (count(*) filter (where c.hora = 13))::int,
+            (count(*) filter (where c.hora = 14))::int, (count(*) filter (where c.hora = 15))::int,
+            (count(*) filter (where c.hora = 16))::int, (count(*) filter (where c.hora = 17))::int,
+            (count(*) filter (where c.hora = 18))::int, (count(*) filter (where c.hora = 19))::int,
+            (count(*) filter (where c.hora = 20))::int, (count(*) filter (where c.hora = 21))::int,
+            (count(*) filter (where c.hora = 22))::int, (count(*) filter (where c.hora = 23))::int
+        ) as byhour
+    from cur c
+    join p_top t on t.key = c.codigo_parada
+    group by 1
 ),
-p_lin as (
-    select key, linea, cnt,
-           row_number() over (partition by key order by cnt desc) as rn
+p_lin_rank as (
+    select key, linea, cnt, row_number() over (partition by key order by cnt desc) as rn
     from (
         select c.codigo_parada as key, c.linea, count(*)::int as cnt
-        from cur c join p_top t on t.key = c.codigo_parada
+        from cur c
+        join p_top t on t.key = c.codigo_parada
         where c.linea is not null
         group by 1, 2
     ) x
+),
+p_lin3 as (
+    select key,
+           jsonb_agg(jsonb_build_object('linea', linea, 'count', cnt) order by cnt desc) as lineas
+    from p_lin_rank where rn <= 3
+    group by key
 ),
 l_top as (
     select linea as key, count(*)::int as cnt
@@ -92,7 +137,6 @@ heat as (
     select hora, dow, count(*)::int as cnt
     from cur group by 1, 2
 ),
--- Período anterior: sólo lo que hace falta para los deltas.
 prev_p as (
     select codigo_parada as key, count(*)::int as cnt
     from prev where codigo_parada is not null group by 1
@@ -102,51 +146,29 @@ prev_l as (
     from prev where linea is not null group by 1
 )
 select jsonb_build_object(
-    'total', (select count(*) from cur),
-    'prevTotal', (select count(*) from prev),
-    'clientes', (select count(distinct client_hash) from cur where client_hash is not null),
-    'cache', jsonb_build_object(
-        'hit',     (select count(*) from cur where cache_status = 'HIT'),
-        'miss',    (select count(*) from cur where cache_status = 'MISS'),
-        'stale',   (select count(*) from cur where cache_status = 'STALE'),
-        'unknown', (select count(*) from cur where cache_status not in ('HIT','MISS','STALE'))
-    ),
-    'latencia', jsonb_build_object(
-        'p50', (select percentile_cont(0.5) within group (order by duration_ms)
-                from cur where duration_ms is not null),
-        'p95', (select percentile_cont(0.95) within group (order by duration_ms)
-                from cur where duration_ms is not null),
-        'muestras', (select count(*) from cur where duration_ms is not null)
-    ),
+    'total',     (select total from tot),
+    'prevTotal', (select count(*)::int from prev),
+    'clientes',  (select clientes from tot),
+    'cache', (select jsonb_build_object('hit', hit, 'miss', miss, 'stale', stale, 'unknown', unknown) from tot),
+    'latencia', (select jsonb_build_object('p50', p50, 'p95', p95, 'muestras', muestras) from tot),
     'heatmap', coalesce((
-        select jsonb_agg(jsonb_build_object('hour', hora, 'dow', dow, 'count', cnt))
-        from heat), '[]'::jsonb),
+        select jsonb_agg(jsonb_build_object('hour', hora, 'dow', dow, 'count', cnt)) from heat
+    ), '[]'::jsonb),
+    -- join, no correlación: p_arr y p_lin3 ya vienen agregados por parada
     'paradas', coalesce((
         select jsonb_agg(jsonb_build_object(
-            'key',   t.key,
-            'count', t.cnt,
-            -- 24 posiciones siempre, con 0 en las horas sin datos
-            'byHour', (
-                select jsonb_agg(coalesce(h.cnt, 0) order by g.i)
-                from generate_series(0, 23) g(i)
-                left join p_hora h on h.key = t.key and h.hora = g.i
-            ),
-            'lineas', coalesce((
-                select jsonb_agg(jsonb_build_object('linea', l.linea, 'count', l.cnt)
-                                 order by l.cnt desc)
-                from p_lin l where l.key = t.key and l.rn <= 3
-            ), '[]'::jsonb)
-        ) order by t.cnt desc)
-        from p_top t), '[]'::jsonb),
+            'key', a.key, 'count', a.cnt, 'byHour', a.byhour,
+            'lineas', coalesce(l.lineas, '[]'::jsonb)
+        ) order by a.cnt desc)
+        from p_arr a left join p_lin3 l on l.key = a.key
+    ), '[]'::jsonb),
     'lineas', coalesce((
-        select jsonb_agg(jsonb_build_object('key', key, 'count', cnt) order by cnt desc)
-        from l_top), '[]'::jsonb),
+        select jsonb_agg(jsonb_build_object('key', key, 'count', cnt) order by cnt desc) from l_top
+    ), '[]'::jsonb),
     'ramales', coalesce((
-        select jsonb_agg(jsonb_build_object('key', key, 'count', cnt) order by cnt desc)
-        from r_top), '[]'::jsonb),
-    'prevParadas', coalesce((
-        select jsonb_object_agg(key, cnt) from prev_p), '{}'::jsonb),
-    'prevLineas', coalesce((
-        select jsonb_object_agg(key, cnt) from prev_l), '{}'::jsonb)
+        select jsonb_agg(jsonb_build_object('key', key, 'count', cnt) order by cnt desc) from r_top
+    ), '[]'::jsonb),
+    'prevParadas', coalesce((select jsonb_object_agg(key, cnt) from prev_p), '{}'::jsonb),
+    'prevLineas',  coalesce((select jsonb_object_agg(key, cnt) from prev_l), '{}'::jsonb)
 );
 $$;
