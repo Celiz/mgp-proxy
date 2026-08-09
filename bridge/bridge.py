@@ -63,15 +63,18 @@ FAST_TIMEOUT_S = 8
 # desde el .env del teléfono.
 HOT_RENEW = os.environ.get("MGP_BRIDGE_HOT_RENEW", "1").strip().lower() not in ("0", "false", "no", "off")
 
-# Esperar a que la red quede quieta al pedir el challenge. Sospechoso número uno
-# del tail: en el A22 se midió un hueco de 61s ENTRE "Cloudflare captcha is
-# solved" y el "Fetched" siguiente, sin una sola línea de log en el medio, y 61s
-# es sospechosamente 2 x los 30s de timeout de networkidle (la 307 y la 200).
-# El p95 de producción es 60.982ms. Queda en el comportamiento de siempre por
-# default porque no está confirmado que la cookie llegue igual sin esto;
-# MGP_BRIDGE_NETWORK_IDLE=0 lo apaga para comparar contra los tiempos que ahora
-# loguea init().
-NETWORK_IDLE = os.environ.get("MGP_BRIDGE_NETWORK_IDLE", "1").strip().lower() not in ("0", "false", "no", "off")
+# Esperar a que la red quede quieta al pedir el challenge. APAGADO por default:
+# era el causante del tail. Medido en el A22, mismo teléfono, mismo día:
+#
+#   network_idle=True    arranque 3.1s + challenge 72.9s + referer 1.0s = 76.9s
+#   network_idle=False   arranque 4.2s + challenge 12.0s + referer 1.0s = 17.1s
+#
+# Los ~60s de diferencia eran espera muerta: el log mostraba el hueco entero
+# ENTRE "Cloudflare captcha is solved" y el "Fetched" siguiente, o sea con el
+# challenge ya resuelto. El p95 de producción era 60.982ms. Y cf_clearance
+# aparece igual sin la espera, así que no se estaba pagando por nada.
+# MGP_BRIDGE_NETWORK_IDLE=1 la vuelve a prender.
+NETWORK_IDLE = os.environ.get("MGP_BRIDGE_NETWORK_IDLE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def parece_challenge(status: int, texto: str) -> bool:
