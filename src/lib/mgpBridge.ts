@@ -57,6 +57,12 @@ const RENEW_MAX_DEFER_MS = 60_000;
  * así que no son evidencia de que MGP esté fallando.
  */
 const MAX_QUEUE_DEPTH = Number(process.env.MGP_BRIDGE_MAX_QUEUE ?? 6);
+/**
+ * Techo de espera de `waitForBridgeReady`, para las requests que no tienen
+ * caché con qué responder. Un init completo mide ~20s en el A22 de producción,
+ * así que 25s deja margen sin colgar al cliente para siempre.
+ */
+const INIT_WAIT_MS = Number(process.env.MGP_BRIDGE_INIT_WAIT_MS ?? 25_000);
 
 type BridgeReply = { error?: string; [k: string]: unknown };
 
@@ -301,6 +307,31 @@ function ensureInit(): Promise<void> {
             initPromise = null;
         });
     return initPromise;
+}
+
+/**
+ * Espera a que termine el init en curso, con techo.
+ *
+ * `fetchMgpBridge` rechaza rápido con `bridge_initializing` para que se sirva
+ * caché stale en vez de hacer esperar al usuario. Pero cuando no hay NADA
+ * cacheado eso devuelve 502, y ahí es peor: visto en producción, durante una
+ * reconstrucción de sesión las paradas nunca consultadas antes se comían un 502
+ * en 4ms, cuando antes habrían esperado y respondido bien. Para ese caso
+ * index.ts espera acá y reintenta una vez -- preferimos tardar a no responder.
+ */
+export function waitForBridgeReady(timeoutMs = INIT_WAIT_MS): Promise<void> {
+    if (ready && !renewing) return Promise.resolve();
+    const deadline = Date.now() + timeoutMs;
+    return new Promise((resolve, reject) => {
+        const tick = (): void => {
+            if (ready && !renewing) return resolve();
+            if (Date.now() >= deadline) {
+                return reject(new Error("bridge_initializing: se agotó la espera del init"));
+            }
+            setTimeout(tick, 250);
+        };
+        tick();
+    });
 }
 
 /** Fuerza un re-init (p.ej. desde /admin/bridge/restart si queda pegado). */
