@@ -20,6 +20,8 @@ const PAGE_SIZE = 1000;
 const SNAPSHOT_CACHE_TTL_MS = 90_000;
 /** El evento más viejo no se mueve nunca hacia adelante, así que se cachea largo. */
 const PRIMER_EVENTO_TTL_MS = 30 * 60_000;
+/** Ventana que usa la vista "todo" contra Postgres: en la práctica, toda la tabla. */
+const DIAS_TODO = 3650;
 const GEO_CACHE_TTL_MS = 10 * 60_000;
 const DEDUPE_WINDOW_MS = 3 * 60_000;
 const LOCAL_FILE = path.join(process.cwd(), "src/data/analytics-local.json");
@@ -979,11 +981,17 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
     const allAcciones = [...TRACKED_ACCIONES];
 
     // Camino rápido: que agregue Postgres y baje unos KB en vez de todos los
-    // eventos crudos (ver supabase/analytics_snapshot.sql). Sólo para ventanas
-    // acotadas: days=0 ("todo") agrega de otra forma y se deja como estaba.
-    // Si la función no existe todavía, `fetchSnapshotRpc` devuelve null y sigue
-    // el camino de siempre, así que el deploy no depende del orden.
-    const rpc = days > 0 ? await fetchSnapshotRpc(days, lineaFilter, hayComparacion) : null;
+    // eventos crudos (ver supabase/analytics_snapshot.sql). Si la función no
+    // existe todavía, `fetchSnapshotRpc` devuelve null y sigue el camino de
+    // siempre, así que el deploy no depende del orden.
+    //
+    // days=0 ("todo") va con una ventana enorme, o sea toda la tabla. Antes
+    // pedía 60 días y agregaba lo que viniera: con la base actual daba lo
+    // mismo, pero el día que haya más de 60 días de historia "todo" habría
+    // pasado a significar "los últimos 60 días" sin avisar. Y no lleva
+    // comparación: "todo" contra "el todo anterior" no quiere decir nada.
+    const rpcDays = days > 0 ? days : DIAS_TODO;
+    const rpc = await fetchSnapshotRpc(rpcDays, lineaFilter, days > 0 && hayComparacion);
 
     const [arribosRaw, funnelCounts, geoMap] = await Promise.all([
         rpc ? Promise.resolve([] as RawEvent[]) : fetchEvents(fetchDays, lineaFilter, [PRODUCT_ACCION]),
@@ -1019,7 +1027,7 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
     const prev = desdeRpc
         ? (desdeRpc.prev as unknown as ReturnType<typeof aggregateArribos>)
         : aggregateArribos(prevOnly);
-    const currCompare = days > 0 ? curr : aggregateArribos(currForCompare);
+    const currCompare = desdeRpc ? curr : days > 0 ? curr : aggregateArribos(currForCompare);
 
     // change % on tops (período comparable)
     const prevParadaMap = new Map(prev.topParadas.map((p) => [p.key, p.count]));
