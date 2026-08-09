@@ -18,6 +18,8 @@ const FLUSH_INTERVAL_MS = 30_000;
 const FLUSH_THRESHOLD = 50;
 const PAGE_SIZE = 1000;
 const SNAPSHOT_CACHE_TTL_MS = 90_000;
+/** El evento más viejo no se mueve nunca hacia adelante, así que se cachea largo. */
+const PRIMER_EVENTO_TTL_MS = 30 * 60_000;
 const GEO_CACHE_TTL_MS = 10 * 60_000;
 const DEDUPE_WINDOW_MS = 3 * 60_000;
 const LOCAL_FILE = path.join(process.cwd(), "src/data/analytics-local.json");
@@ -641,6 +643,34 @@ async function fetchEvents(
     return all;
 }
 
+let primerEventoCache: { at: number; ts: number | null } | null = null;
+
+/**
+ * Timestamp del evento más viejo que hay en la base.
+ *
+ * Sirve para saber si una comparación "vs período anterior" tiene sentido: si
+ * los datos arrancan después del comienzo de esa ventana, no hay con qué
+ * comparar. Es una query indexada que devuelve una fila, y se cachea.
+ */
+async function primerEventoTs(): Promise<number | null> {
+    if (primerEventoCache && Date.now() - primerEventoCache.at < PRIMER_EVENTO_TTL_MS) {
+        return primerEventoCache.ts;
+    }
+    if (!supabase) return null;
+    const { data, error } = await supabase
+        .from("query_events")
+        .select("ts")
+        .order("ts", { ascending: true })
+        .limit(1);
+    if (error) {
+        console.error("[analytics] primerEvento error:", error.message);
+        return null;
+    }
+    const ts = data?.[0]?.ts ? new Date(data[0].ts as string).getTime() : null;
+    primerEventoCache = { at: Date.now(), ts };
+    return ts;
+}
+
 async function loadAllParadaGeo(): Promise<Map<string, GeoRow>> {
     if (!supabase) return new Map();
     if (geoCache && Date.now() - geoCache.at < GEO_CACHE_TTL_MS) return geoCache.byCodigo;
@@ -822,7 +852,19 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
     // Una sola ventana de arribos (2 períodos) + funnel en paralelo
     const windowDays = days > 0 ? days : 30;
     const windowMs = windowDays * 86_400_000;
-    const fetchDays = days > 0 ? days * 2 : 60;
+
+    // ¿Alcanza la historia para comparar contra el período anterior? Si los
+    // datos arrancan después del comienzo de esa ventana, no hay con qué
+    // comparar -- y compararlo igual daba "+100%" en TODO el dashboard (ver
+    // `changePct`: con prev=0 devolvía 100), además de bajar el doble de filas
+    // para nada. Medido: la vista de 30 días bajaba 60 días de eventos crudos
+    // al teléfono y tardaba 21s para mostrar un +100% inventado.
+    const primerEvento = await primerEventoTs();
+    const hayComparacion =
+        primerEvento !== null && primerEvento <= Date.now() - windowMs * 2;
+    // days=0 ("todo") agrega TODO lo que baje, así que su ventana no se toca:
+    // recortarla cambiaría los totales que muestra, no sólo la comparación.
+    const fetchDays = days > 0 ? (hayComparacion ? days * 2 : days) : 60;
     const allAcciones = [...TRACKED_ACCIONES];
 
     const [arribosRaw, funnelCounts, geoMap] = await Promise.all([
@@ -849,6 +891,11 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
         return t >= cutoffPrev && t < cutoffCurr;
     });
 
+    // Sin período anterior completo no se compara nada: null significa "sin
+    // comparación" y el front lo muestra como tal, en vez de un +100% que sólo
+    // decía "no tengo historia".
+    const cmpPct = (c: number, p: number): number | null => (hayComparacion ? changePct(c, p) : null);
+
     const curr = aggregateArribos(days > 0 ? currRaw : arribosRaw);
     const prev = aggregateArribos(prevOnly);
     const currCompare = days > 0 ? curr : aggregateArribos(currForCompare);
@@ -865,7 +912,7 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
         return {
             ...p,
             nombre: p.nombre ?? paradaDisplayName(p.key) ?? geoMap.get(p.key)?.nombre ?? null,
-            changePct: changePct(days > 0 ? p.count : cmp, prevParadaMap.get(p.key) ?? 0),
+            changePct: cmpPct(days > 0 ? p.count : cmp, prevParadaMap.get(p.key) ?? 0),
         };
     });
 
@@ -873,7 +920,7 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
         const cmp = cmpLineaMap.get(p.key) ?? p.count;
         return {
             ...p,
-            changePct: changePct(days > 0 ? p.count : cmp, prevLineaMap.get(p.key) ?? 0),
+            changePct: cmpPct(days > 0 ? p.count : cmp, prevLineaMap.get(p.key) ?? 0),
         };
     });
 
@@ -954,7 +1001,7 @@ export async function getAnalyticsSnapshot(days = 0, lineaFilter?: string): Prom
     const data: AnalyticsSnapshot = {
         totalEvents,
         prevTotalEvents,
-        changePct: changePct(totalForDelta, prevTotalEvents),
+        changePct: cmpPct(totalForDelta, prevTotalEvents),
         topParadas,
         topLineas,
         emergingLineas,
