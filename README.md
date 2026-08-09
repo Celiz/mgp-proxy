@@ -64,7 +64,7 @@ porque no abre una segunda sesión, reusa la única que hay. Se puede desactivar
 `MGP_BRIDGE_HOT_RENEW=0`.
 
 **Mientras haya un init en curso, las requests no esperan.** Antes se encolaban detrás y
-el usuario pagaba los ~20s del challenge (en producción se midieron requests de 21s, y un
+el usuario pagaba el challenge entero (en producción se midieron requests de 81s, y un
 p99 de 85.974 ms contra un `MGP_CHALLENGE_TIMEOUT_MS` de 90.000 que no era casualidad).
 Ahora se rechazan al toque con `bridge_initializing`, que `mgpQueue.ts` no cuenta para el
 circuit breaker y que hace que se sirva caché stale. La única excepción es el arranque en
@@ -210,6 +210,7 @@ debería hacer falta si Debian arm64 sigue estando soportado, pero queda como pl
 | `MGP_BRIDGE_FETCH_TIMEOUT_MS` | `15000` | Timeout de cada request a `webWS.php` vía el bridge |
 | `MGP_BRIDGE_RENEW_MS` | `540000` (9 min) | Cada cuánto renueva la sesión en segundo plano |
 | `MGP_BRIDGE_HOT_RENEW` | `1` (prendido) | Renovar la clearance sobre la sesión viva en vez de reiniciar Chromium. `0` lo apaga y vuelve al camino completo |
+| `MGP_BRIDGE_NETWORK_IDLE` | `0` (apagado) | Esperar red quieta al pedir el challenge. Apagado a propósito: prendido sumaba ~60s muertos por init (medido). `1` lo vuelve a prender |
 | `MGP_BRIDGE_MAX_QUEUE` | `6` | Tope de requests esperando turno en el bridge antes de rechazar rápido con `bridge_busy` |
 | `MGP_BRIDGE_FAST_FETCH` | apagado | Fast path experimental: repite las requests con `curl_cffi` en vez de pasarlas por el navegador. Prender con `1`/`true`. Ante un challenge cae solo al camino de siempre |
 | `MGP_BRIDGE_FAST_IMPERSONATE` | auto | Qué Chrome imita `curl_cffi` (`chrome131`, `chrome124`, …). Por defecto lo deduce del User-Agent real; usar el que gane `bridge/spike_curl_cffi.py` |
