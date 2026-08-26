@@ -32,7 +32,9 @@ import time
 import re
 import sys
 import json
+import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 from scrapling.fetchers import StealthySession
 
@@ -76,6 +78,23 @@ HOT_RENEW = os.environ.get("MGP_BRIDGE_HOT_RENEW", "1").strip().lower() not in (
 # MGP_BRIDGE_NETWORK_IDLE=1 la vuelve a prender.
 NETWORK_IDLE = os.environ.get("MGP_BRIDGE_NETWORK_IDLE", "0").strip().lower() in ("1", "true", "yes", "on")
 
+# Cuántas requests del fast path pueden estar en vuelo a la vez.
+#
+# El navegador es serial por obligación (la API sync de Playwright no tolera dos
+# hilos), pero curl_cffi no lo toca: son llamadas de red y nada más. Hasta ahora
+# igual se serializaban, porque el loop de main() atendía un comando por vez --
+# así que el fast path bajaba el costo de cada request pero no destrababa el
+# throughput, y durante los ~10s de cada renovación no entraba ninguna.
+#
+# 4 es deliberadamente conservador: el cuello de botella real es MGP, y el lado
+# Node ya tiene su propio rate limit (mgpQueue.ts, 2 rps). Esto sólo evita que
+# una request tenga que esperar a que termine la anterior.
+FAST_WORKERS = max(1, int(os.environ.get("MGP_BRIDGE_FAST_WORKERS", "4")))
+
+# stdout lo comparten el hilo principal y los del pool. Sin esto dos respuestas
+# pueden entrelazarse en la misma línea y el lado Node descarta las dos.
+_stdout_lock = threading.Lock()
+
 
 def parece_challenge(status: int, texto: str) -> bool:
     """
@@ -111,8 +130,10 @@ def respuesta(data: dict, msg_id=None):
     """
     if msg_id is not None:
         data = {**data, "id": msg_id}
-    sys.stdout.write(json.dumps(data) + "\n")
-    sys.stdout.flush()
+    linea = json.dumps(data) + "\n"
+    with _stdout_lock:
+        sys.stdout.write(linea)
+        sys.stdout.flush()
 
 
 def log(msg: str):
@@ -360,15 +381,20 @@ class Bridge:
             and bool(self.user_agent)
         )
 
-    def fetch(self, body: str) -> dict:
+    def fetch(self, body: str, permitir_fast: bool = True) -> dict:
         """
         Con el fast path prendido intenta primero por curl_cffi, que no pasa por
         el navegador y por lo tanto no se serializa contra el resto; si eso
         huele a challenge cae al camino de siempre. La red de seguridad no es
         opcional: si Cloudflare invalida la clearance se pierde velocidad, nunca
         capacidad.
+
+        `permitir_fast=False` lo manda el lado Node (`noFast`) cuando la request
+        ya fracasó por el atajo y viene a reintentar por el navegador. Sin eso
+        se volvía a intentar curl_cffi acá adentro y se pagaban los 8s del
+        timeout dos veces por la misma request.
         """
-        if self._fast_disponible():
+        if permitir_fast and self._fast_disponible():
             rapida = self._fetch_rapido(body)
             if rapida is not None:
                 return rapida
@@ -461,11 +487,44 @@ class Bridge:
             self.api_page = None
 
 
+def con_estado(bridge: "Bridge", data: dict) -> dict:
+    """
+    `fastReady` le dice al lado Node si este comando se puede mandar sin pasar
+    por su mutex. Viaja en cada respuesta porque el estado cambia solo: un
+    challenge apaga el fast path hasta el próximo init, y Node necesita
+    enterarse sin tener que preguntar.
+    """
+    return {**data, "fastReady": bridge._fast_disponible()}
+
+
+def atender_fast(bridge: "Bridge", body: str, msg_id):
+    """
+    Atiende un fetch en un hilo del pool. SÓLO curl_cffi, nunca el navegador:
+    la API sync de Playwright revienta si se la toca fuera del hilo principal,
+    así que cuando el atajo no sirve devolvemos `retrySerial` y el lado Node
+    reenvía el mismo body por el camino serial (con `noFast`, para no volver a
+    caer acá y quedar en loop).
+    """
+    try:
+        rapida = bridge._fetch_rapido(body)
+    except Exception:
+        log(traceback.format_exc())
+        rapida = None
+
+    if rapida is None:
+        respuesta({"retrySerial": True, "fastReady": bridge._fast_disponible()}, msg_id)
+        return
+    respuesta(con_estado(bridge, rapida), msg_id)
+
+
 def main():
     bridge = Bridge()
     log("Bridge ready")
     if FAST_FETCH:
         log(f"fast path prendido (MGP_BRIDGE_FAST_FETCH), curl_cffi={'ok' if curl_requests else 'FALTA'}")
+        log(f"fast workers: {FAST_WORKERS}")
+
+    pool = ThreadPoolExecutor(max_workers=FAST_WORKERS, thread_name_prefix="fast")
 
     for line in sys.stdin:
         line = line.strip()
@@ -481,11 +540,19 @@ def main():
         msg_id = msg.get("id")
         try:
             if cmd == "init":
-                respuesta(bridge.init(bool(msg.get("force"))), msg_id)
+                respuesta(con_estado(bridge, bridge.init(bool(msg.get("force")))), msg_id)
             elif cmd == "fetch":
-                respuesta(bridge.fetch(msg["body"]), msg_id)
+                # El fast path se va al pool y deja el loop libre para seguir
+                # leyendo. El camino por navegador se atiende acá mismo, en
+                # serie, que es la única forma en que Playwright sync funciona.
+                noFast = bool(msg.get("noFast"))
+                if bridge._fast_disponible() and not noFast:
+                    pool.submit(atender_fast, bridge, msg["body"], msg_id)
+                else:
+                    respuesta(con_estado(bridge, bridge.fetch(msg["body"], not noFast)), msg_id)
             elif cmd == "shutdown":
                 log("Shutting down...")
+                pool.shutdown(wait=False)
                 bridge.close()
                 respuesta({"ok": True}, msg_id)
                 break

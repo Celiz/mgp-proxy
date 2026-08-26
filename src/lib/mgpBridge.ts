@@ -58,6 +58,23 @@ const RENEW_MAX_DEFER_MS = 60_000;
  */
 const MAX_QUEUE_DEPTH = Number(process.env.MGP_BRIDGE_MAX_QUEUE ?? 6);
 /**
+ * Techo de requests del fast path en vuelo a la vez.
+ *
+ * Estas no pasan por `enqueue()`: el mutex existe porque bridge.py atendía un
+ * comando por vez, y eso ya no es cierto para el atajo por curl_cffi, que
+ * corre en un pool de hilos y no toca el navegador. Mantener el mutex acá
+ * significaba serializar requests que no lo necesitan -- y peor, dejarlas
+ * afuera durante los ~10s de cada renovación, que es de donde salían los
+ * 43.874 `bridge_initializing: renovando la sesión`.
+ *
+ * Tiene que acompañar a `MGP_BRIDGE_FAST_WORKERS` del lado Python (mismo
+ * default, 4): si Node deja entrar más de las que el pool puede atender, las de
+ * más esperan turno adentro de bridge.py y se comen dos veces el timeout de
+ * curl (8s) contra el techo de 15s de `FETCH_TIMEOUT_MS` -- o sea que volverían
+ * como `bridge_timeout`, que es justo lo que esto viene a evitar.
+ */
+const FAST_MAX_INFLIGHT = Number(process.env.MGP_BRIDGE_FAST_INFLIGHT ?? 4);
+/**
  * Techo de espera de `waitForBridgeReady`, para las requests que no tienen
  * caché con qué responder. Un init completo mide ~20s en el A22 de producción,
  * así que 25s deja margen sin colgar al cliente para siempre.
@@ -126,6 +143,17 @@ let renewing = false;
 let forceNextInit = false;
 let queueDepth = 0;
 let busyRejections = 0;
+/**
+ * ¿bridge.py puede atender un fetch por el atajo, sin navegador? Lo dice él en
+ * cada respuesta (`fastReady`), porque el estado cambia solo: un challenge
+ * apaga el fast path hasta el próximo init. Arranca en false y se enciende con
+ * la primera respuesta del init.
+ */
+let fastReady = false;
+let fastInflight = 0;
+/** Cuántos fetch se sirvieron por cada camino. Para /stats/data. */
+let fastServed = 0;
+let fastFallbacks = 0;
 
 function log(msg: string): void {
     console.log(`[mgpBridge] ${msg}`);
@@ -140,6 +168,10 @@ function onDisconnect(reason: string): void {
         p.reject(new Error(`bridge_disconnected: ${reason}`));
     }
     ready = false;
+    // El proceso nuevo arranca sin cookies, así que su fast path no está listo
+    // por más que el viejo lo estuviera. Sin esto, la primera request post-crash
+    // se iría por el atajo contra un bridge que todavía no tiene sesión.
+    fastReady = false;
     rl?.close();
     rl = null;
     proc = null;
@@ -162,6 +194,9 @@ function spawnProcess(): void {
             log(`línea no-JSON del bridge, ignorada: ${trimmed}`);
             return;
         }
+        // Viaja en toda respuesta del bridge, incluso en las que se descartan
+        // por tardías: es estado del proceso, no de este comando.
+        if (typeof data.fastReady === "boolean") fastReady = data.fastReady;
         const id = typeof data.id === "number" ? data.id : null;
         if (id === null) {
             // Sólo puede pasar si el bridge no pudo ni parsear el comando y no
@@ -359,29 +394,12 @@ export function isMgpBridgeEnabled(): boolean {
  * Punto de entrada del transporte. El body viaja tal cual: el contrato del WS
  * web es el mismo que ya habla el frontend, así que no hay traducción.
  */
-export async function fetchMgpBridge(body: string): Promise<unknown> {
-    // Resolver el challenge cuesta ~20s en el A22 de producción (~11s de
-    // arrancar Chromium + ~9s de Turnstile), y hasta ahora ese costo lo pagaba
-    // el usuario: `await ensureInit()` acá adentro, con techo de 90s. En el log
-    // de producción se ven dos requests de 21s y 9s esperando el mismo init, y
-    // el p99 de 85.974ms contra un INIT_TIMEOUT_MS de 90.000 no es casualidad.
-    //
-    // Ahora sólo se espera cuando no hay alternativa: en el arranque en frío,
-    // donde no existe ni caché para servir. Si el bridge ya sirvió alguna vez,
-    // el re-init arranca en segundo plano y esta request se rechaza al toque
-    // con `bridge_initializing` -- que mgpQueue.ts no cuenta para el breaker, y
-    // que hace que index.ts conteste con caché stale en vez de colgar al
-    // usuario 20s.
-    if (!ready || renewing) {
-        if (!everReady) {
-            await ensureInit();
-        } else {
-            if (!renewing) ensureInit().catch(() => {});
-            throw new Error("bridge_initializing: renovando la sesión, sirvo stale");
-        }
-    }
-
-    const result = await enqueue(() => send({ cmd: "fetch", body }, FETCH_TIMEOUT_MS));
+/**
+ * Traduce la respuesta cruda del bridge. La comparten los dos caminos (atajo y
+ * navegador), porque el contenido es el mismo: lo único que cambia es cómo se
+ * llegó hasta acá.
+ */
+function interpretarRespuesta(result: BridgeReply): unknown {
     if (result.error) throw new Error(`bridge_error: ${result.error}`);
 
     const status = Number(result.status ?? 0);
@@ -412,6 +430,61 @@ export async function fetchMgpBridge(body: string): Promise<unknown> {
     }
 }
 
+export async function fetchMgpBridge(body: string): Promise<unknown> {
+    // Camino rápido: sin mutex y sin esperar a que termine una renovación.
+    //
+    // `enqueue()` existe porque bridge.py atendía un comando por vez. Para el
+    // atajo por curl_cffi eso ya no es cierto -- corre en un pool de hilos y no
+    // toca el navegador -- así que pasarlo por el mutex serializaba requests que
+    // no lo necesitan, y las dejaba afuera durante los ~10s de cada renovación.
+    // De ahí salían los 43.874 `bridge_initializing: renovando la sesión`.
+    //
+    // Ojo con el orden: esto va ANTES del guard de abajo a propósito. La sesión
+    // que se está renovando es la del navegador; la clearance que usa el atajo
+    // sigue viva (bridge.py no la limpia en `close()`, justamente por esto).
+    if (fastReady && fastInflight < FAST_MAX_INFLIGHT) {
+        fastInflight++;
+        try {
+            const rapida = await send({ cmd: "fetch", body }, FETCH_TIMEOUT_MS);
+            if (!rapida.retrySerial) {
+                fastServed++;
+                return interpretarRespuesta(rapida);
+            }
+            // El atajo no pudo (error de red, o Cloudflare rechazando). Cae al
+            // camino de siempre, que sí puede usar el navegador.
+            fastFallbacks++;
+        } finally {
+            fastInflight--;
+        }
+    }
+
+    // Resolver el challenge cuesta ~20s en el A22 de producción (~11s de
+    // arrancar Chromium + ~9s de Turnstile), y hasta ahora ese costo lo pagaba
+    // el usuario: `await ensureInit()` acá adentro, con techo de 90s. En el log
+    // de producción se ven dos requests de 21s y 9s esperando el mismo init, y
+    // el p99 de 85.974ms contra un INIT_TIMEOUT_MS de 90.000 no es casualidad.
+    //
+    // Ahora sólo se espera cuando no hay alternativa: en el arranque en frío,
+    // donde no existe ni caché para servir. Si el bridge ya sirvió alguna vez,
+    // el re-init arranca en segundo plano y esta request se rechaza al toque
+    // con `bridge_initializing` -- que mgpQueue.ts no cuenta para el breaker, y
+    // que hace que index.ts conteste con caché stale en vez de colgar al
+    // usuario 20s.
+    if (!ready || renewing) {
+        if (!everReady) {
+            await ensureInit();
+        } else {
+            if (!renewing) ensureInit().catch(() => {});
+            throw new Error("bridge_initializing: renovando la sesión, sirvo stale");
+        }
+    }
+
+    // `noFast` para que bridge.py no vuelva a mandarlo al pool: si llegamos
+    // hasta acá es porque el atajo ya falló, o porque nunca estuvo disponible.
+    const result = await enqueue(() => send({ cmd: "fetch", body, noFast: true }, FETCH_TIMEOUT_MS));
+    return interpretarRespuesta(result);
+}
+
 export function getBridgeStatus(): {
     ready: boolean;
     initializing: boolean;
@@ -421,6 +494,10 @@ export function getBridgeStatus(): {
     queueDepth: number;
     maxQueueDepth: number;
     busyRejections: number;
+    fastReady: boolean;
+    fastInflight: number;
+    fastServed: number;
+    fastFallbacks: number;
 } {
     return {
         ready,
@@ -431,6 +508,13 @@ export function getBridgeStatus(): {
         queueDepth,
         maxQueueDepth: MAX_QUEUE_DEPTH,
         busyRejections,
+        // Sin esto no había forma de saber desde afuera si el atajo estaba
+        // funcionando o cayéndose en silencio al navegador: bridge.py lo
+        // loguea a stderr y nadie lo guardaba.
+        fastReady,
+        fastInflight,
+        fastServed,
+        fastFallbacks,
     };
 }
 
