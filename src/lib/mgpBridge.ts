@@ -80,6 +80,25 @@ const FAST_MAX_INFLIGHT = Number(process.env.MGP_BRIDGE_FAST_INFLIGHT ?? 4);
  * así que 25s deja margen sin colgar al cliente para siempre.
  */
 const INIT_WAIT_MS = Number(process.env.MGP_BRIDGE_INIT_WAIT_MS ?? 25_000);
+/**
+ * Piso entre dos inits REACTIVOS (los que dispara un challenge).
+ *
+ * `ensureInit()` sólo se guardaba con `ready` e `initPromise`, así que cuando
+ * Cloudflare deja de aceptar la clearance entra en loop: challenge -> ready=false
+ * -> init -> challenge, medido en producción **cada ~23s** (lastInitAt
+ * 18:18:07, 18:18:30, 18:18:54, 18:19:16, 18:19:49, 18:20:13). En un celular
+ * cada vuelta reconstruye Chromium, y el proceso termina muriéndose por RAM.
+ *
+ * El mgpWeb.ts viejo tenía este mismo freno (`RENEW_COOLDOWN_MS`, 60s) y se
+ * perdió al reemplazarlo por el bridge. Cuando MGP no nos quiere, insistir cada
+ * 23s no lo arregla: sólo quema batería y tira el proceso. Mientras tanto se
+ * sirve del caché stale, que para eso está.
+ *
+ * No aplica al arranque en frío (`!everReady`): ahí no hay nada con qué servir
+ * y hay que intentar sí o sí. Tampoco a la renovación proactiva, que no pasa
+ * por acá (ver `attemptRenew`).
+ */
+const INIT_COOLDOWN_MS = Number(process.env.MGP_BRIDGE_INIT_COOLDOWN_MS ?? 60_000);
 
 type BridgeReply = { error?: string; [k: string]: unknown };
 
@@ -151,6 +170,8 @@ let busyRejections = 0;
  */
 let fastReady = false;
 let fastInflight = 0;
+/** Cuándo se intentó el último init, para el cooldown de `ensureInit`. */
+let lastInitAttemptAt = 0;
 /** Cuántos fetch se sirvieron por cada camino. Para /stats/data. */
 let fastServed = 0;
 let fastFallbacks = 0;
@@ -320,6 +341,15 @@ function attemptRenew(dueSince: number): void {
 function ensureInit(): Promise<void> {
     if (ready) return Promise.resolve();
     if (initPromise) return initPromise;
+    // Cooldown antes de leer `forceNextInit`: si rebotamos acá, la bandera
+    // tiene que sobrevivir para el intento que sí salga.
+    if (everReady && Date.now() - lastInitAttemptAt < INIT_COOLDOWN_MS) {
+        const faltan = Math.ceil((INIT_COOLDOWN_MS - (Date.now() - lastInitAttemptAt)) / 1000);
+        return Promise.reject(
+            new Error(`bridge_initializing: init en cooldown ${faltan}s, sirvo stale`),
+        );
+    }
+    lastInitAttemptAt = Date.now();
     const force = forceNextInit;
     forceNextInit = false;
     log(`inicializando (resolviendo Cloudflare)${force ? ", forzando sesión nueva" : ""}...`);
@@ -360,6 +390,13 @@ export function waitForBridgeReady(timeoutMs = INIT_WAIT_MS): Promise<void> {
     return new Promise((resolve, reject) => {
         const tick = (): void => {
             if (ready && !renewing) return resolve();
+            // En cooldown y sin init en vuelo no hay nada que esperar: nadie va
+            // a poner `ready` en true hasta que el cooldown venza. Sin este
+            // corte, index.ts colgaba la request los 25s completos de
+            // INIT_WAIT_MS para terminar igual en 502.
+            if (!initPromise && everReady && Date.now() - lastInitAttemptAt < INIT_COOLDOWN_MS) {
+                return reject(new Error("bridge_initializing: init en cooldown, sirvo stale"));
+            }
             if (Date.now() >= deadline) {
                 return reject(new Error("bridge_initializing: se agotó la espera del init"));
             }
