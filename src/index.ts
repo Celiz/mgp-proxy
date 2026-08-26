@@ -177,6 +177,41 @@ function getTtls(accion: string): { fresh: number; stale: number } {
     return { fresh: 30_000, stale: 600_000 };
 }
 
+/**
+ * `Cache-Control` para el edge y el browser.
+ *
+ * Hasta ahora este header era casi decorativo: Cloudflare no cachea
+ * `application/json` sin una Cache Rule explícita, así que respondía
+ * `cf-cache-status: DYNAMIC` y todas las requests llegaban al origin. Con la
+ * regla puesta sobre `/mgp/*` los valores pasan a tener efecto real, y ahí
+ * importa distinguir tres casos que antes daban lo mismo:
+ *
+ * - **OK**: se cachea el TTL completo. El `stale-while-revalidate` es lo que
+ *   hace que una renovación del bridge (~10s cada 9 min) no se le note al
+ *   usuario: el edge sigue sirviendo mientras revalida por atrás.
+ * - **Error de negocio** (`CodigoEstado != 0`): no se cachea. `esRespuestaOk`
+ *   ya lo excluía del caché en memoria, pero el header salía igual — con la
+ *   regla activa, un "Parada inexistente" en una acción semi-estática quedaba
+ *   pegado 6h en el edge.
+ * - **Stale**: TTL corto. Es un dato viejo servido porque MGP falló; pinearlo
+ *   6h en el edge multiplica el problema en vez de amortiguarlo.
+ */
+function cacheControl(accion: string, tipo: "ok" | "stale"): string {
+    const isSemiStatic = SEMI_STATIC_ACCIONES.has(accion);
+    if (tipo === "stale") {
+        // Corto y parejo para las dos familias: lo único que se busca es
+        // absorber la ráfaga inmediata, no fijar el dato viejo.
+        return "public, max-age=5, s-maxage=10, stale-while-revalidate=30";
+    }
+    const sMaxAge = isSemiStatic ? 21_600 : 30;
+    const browserMaxAge = isSemiStatic ? 3_600 : 15;
+    const swr = isSemiStatic ? 86_400 : 60;
+    return `public, max-age=${browserMaxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=${swr}`;
+}
+
+/** Respuestas que no deben quedar en ningún caché: errores de negocio y 502. */
+const NO_STORE = "no-store";
+
 // 4. Proxy helpers — analytics de producto
 function clientHashFrom(c: import("hono").Context): string | null {
     const explicit =
@@ -309,9 +344,6 @@ app.get("/mgp/:accion", async (c) => {
     const now = Date.now();
     const cached = proxyCache.get(key);
     const { fresh: freshTtl, stale: staleTtl } = getTtls(accion);
-    const isSemiStatic = SEMI_STATIC_ACCIONES.has(accion);
-    const sMaxAge = isSemiStatic ? 21_600 : 30;
-    const browserMaxAge = isSemiStatic ? 3_600 : 15;
     recordAccion(accion);
     const parada = params["CodigoParada"] ?? params["codigoParada"] ?? params["parada"] ?? params["identificadorParada"];
     if (parada) recordParada(parada);
@@ -325,17 +357,19 @@ app.get("/mgp/:accion", async (c) => {
         recordCache("HIT");
         trackProxyEvent(c, { accion, parada, linea, ramal, cache: "HIT", startedAt });
         c.header("X-Cache", "HIT");
-        c.header("Cache-Control", `public, max-age=${browserMaxAge}, s-maxage=${sMaxAge}`);
+        // Sólo entra acá lo que `esRespuestaOk` dejó guardar, así que es OK.
+        c.header("Cache-Control", cacheControl(accion, "ok"));
         return c.json(cached.payload as Record<string, unknown>);
     }
 
     try {
         const data = await enqueueMgp(body, { priority: "high" });
-        if (esRespuestaOk(data)) proxyCacheSet(key, { at: now, payload: data, status: 200 });
+        const ok = esRespuestaOk(data);
+        if (ok) proxyCacheSet(key, { at: now, payload: data, status: 200 });
         recordCache("MISS");
         trackProxyEvent(c, { accion, parada, linea, ramal, cache: "MISS", startedAt });
         c.header("X-Cache", "MISS");
-        c.header("Cache-Control", `public, max-age=${browserMaxAge}, s-maxage=${sMaxAge}`);
+        c.header("Cache-Control", ok ? cacheControl(accion, "ok") : NO_STORE);
         return c.json(data as Record<string, unknown>);
     } catch (e) {
         const message = (e as Error).message;
@@ -344,7 +378,7 @@ app.get("/mgp/:accion", async (c) => {
             trackProxyEvent(c, { accion, parada, linea, ramal, cache: "STALE", startedAt });
             c.header("X-Cache", "STALE");
             c.header("X-Stale-Reason", message.slice(0, 120));
-            c.header("Cache-Control", `public, max-age=${browserMaxAge}, s-maxage=${sMaxAge}`);
+            c.header("Cache-Control", cacheControl(accion, "stale"));
             return c.json(cached.payload as Record<string, unknown>);
         }
         // Sin caché que servir, un rechazo por `bridge_initializing` significa
@@ -355,11 +389,12 @@ app.get("/mgp/:accion", async (c) => {
             try {
                 await waitForBridgeReady();
                 const data = await enqueueMgp(body, { priority: "high" });
-                if (esRespuestaOk(data)) proxyCacheSet(key, { at: Date.now(), payload: data, status: 200 });
+                const ok = esRespuestaOk(data);
+                if (ok) proxyCacheSet(key, { at: Date.now(), payload: data, status: 200 });
                 recordCache("MISS");
                 trackProxyEvent(c, { accion, parada, linea, ramal, cache: "MISS", startedAt });
                 c.header("X-Cache", "MISS");
-                c.header("Cache-Control", `public, max-age=${browserMaxAge}, s-maxage=${sMaxAge}`);
+                c.header("Cache-Control", ok ? cacheControl(accion, "ok") : NO_STORE);
                 return c.json(data as Record<string, unknown>);
             } catch {
                 // Sigue de largo al 502 de abajo.
@@ -367,6 +402,9 @@ app.get("/mgp/:accion", async (c) => {
         }
         recordError(`GET /mgp/${accion}`, 502, message);
         trackProxyEvent(c, { accion, parada, linea, ramal, cache: "UNKNOWN", startedAt });
+        // Explícito y no por default: con una Cache Rule de "cache everything"
+        // no queremos depender de qué hace Cloudflare con un 5xx sin header.
+        c.header("Cache-Control", NO_STORE);
         return c.json({ error: "mgp_unavailable", message }, 502);
     }
 });
