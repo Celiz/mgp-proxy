@@ -50,8 +50,24 @@ Node (proxy)  ◄──stdin/stdout, JSON por línea──►  bridge/bridge.py 
 ```
 
 El bridge es un subproceso Python de larga vida (`bridge/bridge.py`) que el proxy
-arranca solo. Mantiene una sesión de navegador viva y la renueva en segundo plano cada
-~9 minutos (configurable con `MGP_BRIDGE_RENEW_MS`).
+arranca solo. Mantiene una sesión de navegador viva y la renueva en segundo plano **cuando
+la clearance está por vencer**: Cloudflare pone el vencimiento en la cookie `cf_clearance`,
+el bridge lo reporta en cada init y el proxy agenda la próxima contra eso
+(`MGP_BRIDGE_RENEW_MARGIN_MS` antes, acotado entre `MGP_BRIDGE_RENEW_MIN_MS` y
+`MGP_BRIDGE_RENEW_MAX_MS`). Si la cookie no trae vencimiento propio, cae al intervalo fijo
+de `MGP_BRIDGE_RENEW_MS` (~9 min).
+
+Cloudflare sólo entrega una clearance nueva cuando challengea, y no challengea mientras la
+vieja siga válida: por eso el margen es corto y, si un intento vuelve con el mismo
+`expires` (revalidó, no renovó), el siguiente se agenda **apenas pasado el vencimiento**,
+que es donde el challenge está garantizado. Así el ciclo termina siempre en una renovación
+de verdad y no en un 403 atendido por el camino reactivo.
+
+Antes se renovaba cada ~9 minutos y punto, y eso era caro al pedo: si Cloudflare no
+challengea, el re-fetch de la entrada devuelve la misma cookie con el mismo vencimiento
+—se revalida, no se renueva— así que se pagaba el hueco de la renovación sin ganar un
+segundo de vigencia. Con un "Challenge Passage" de 30 minutos son ~3 renovaciones inútiles
+por cada una que sirve.
 
 La renovación intenta primero **en caliente**: le vuelve a pedir el challenge a la sesión
 que ya está abierta, sin reiniciar Chromium. Medido en el A22 de producción, un init
@@ -109,6 +125,12 @@ moment", esa request **cae al camino de siempre** (`page.evaluate`) y el fast pa
 apagado hasta el próximo init, que lo vuelve a prender con credenciales frescas. Si
 Cloudflare invalida la clearance se pierde velocidad, nunca capacidad. Un error de red
 transitorio también cae al navegador, pero sin apagar el atajo.
+
+El atajo tampoco se manda **mientras hay un init en curso**, aunque no use el navegador:
+`bridge.py` lee stdin en serie y atiende el init en el hilo principal, así que una request
+mandada en esa ventana queda dormida en el pipe hasta que el init termine — y si eso pasa
+los 15 s de `MGP_BRIDGE_FETCH_TIMEOUT_MS` vuelve como `bridge_timeout`, que sí cuenta para
+el circuit breaker. Preferimos servir stale, que es gratis.
 
 Antes de prenderlo en producción hay que correr `bridge/spike_curl_cffi.py`, que resuelve
 el challenge una vez y compara la misma consulta por los dos caminos (más latencia y una
@@ -208,7 +230,10 @@ debería hacer falta si Debian arm64 sigue estando soportado, pero queda como pl
 | `MGP_BRIDGE_PYTHON` | `bridge/.venv/bin/python3` | Ruta al intérprete Python del bridge |
 | `MGP_CHALLENGE_TIMEOUT_MS` | `90000` | Techo para resolver el Turnstile (medido: ~10s en una PC) |
 | `MGP_BRIDGE_FETCH_TIMEOUT_MS` | `15000` | Timeout de cada request a `webWS.php` vía el bridge |
-| `MGP_BRIDGE_RENEW_MS` | `540000` (9 min) | Cada cuánto renueva la sesión en segundo plano |
+| `MGP_BRIDGE_RENEW_MS` | `540000` (9 min) | Cada cuánto renueva **si la clearance no dice cuándo vence**. Con vencimiento conocido manda ese |
+| `MGP_BRIDGE_RENEW_MARGIN_MS` | `30000` (30 s) | Cuánto antes del vencimiento de `cf_clearance` se renueva. Corto a propósito: Cloudflare no da cookie nueva mientras la vieja siga válida |
+| `MGP_BRIDGE_RENEW_MIN_MS` | `60000` (1 min) | Piso de la renovación agendada por vencimiento |
+| `MGP_BRIDGE_RENEW_MAX_MS` | `1800000` (30 min) | Techo de la renovación agendada por vencimiento |
 | `MGP_BRIDGE_HOT_RENEW` | `1` (prendido) | Renovar la clearance sobre la sesión viva en vez de reiniciar Chromium. `0` lo apaga y vuelve al camino completo |
 | `MGP_BRIDGE_NETWORK_IDLE` | `0` (apagado) | Esperar red quieta al pedir el challenge. Apagado a propósito: prendido sumaba ~60s muertos por init (medido). `1` lo vuelve a prender |
 | `MGP_BRIDGE_MAX_QUEUE` | `6` | Tope de requests esperando turno en el bridge antes de rechazar rápido con `bridge_busy` |

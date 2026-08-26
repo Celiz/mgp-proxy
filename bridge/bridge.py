@@ -225,18 +225,52 @@ class Bridge:
         php_sess_id = next(
             (c["value"] for c in resp.cookies if c["name"] == "PHPSESSID"), None
         )
-        log(f"PHPSESSID: {php_sess_id}")
-        return {"ok": True, "phpSessId": php_sess_id}
+        expira_ms = self._clearance_expira_ms()
+        log(f"PHPSESSID: {php_sess_id}{self._vencimiento_log(expira_ms)}")
+        return {"ok": True, "phpSessId": php_sess_id, "clearanceExpiresAt": expira_ms}
 
-    def _clearance_actual(self) -> str | None:
-        """El valor de cf_clearance en la sesión, si hay."""
+    def _clearance_cookie(self) -> dict | None:
+        """La cookie cf_clearance entera de la sesión, si hay."""
         try:
             return next(
-                (c["value"] for c in self.session.context.cookies() if c["name"] == "cf_clearance"),
+                (c for c in self.session.context.cookies() if c["name"] == "cf_clearance"),
                 None,
             )
         except Exception:
             return None
+
+    def _clearance_actual(self) -> str | None:
+        """El valor de cf_clearance en la sesión, si hay."""
+        cookie = self._clearance_cookie()
+        return cookie["value"] if cookie else None
+
+    def _clearance_expira_ms(self) -> int | None:
+        """
+        Cuándo vence la clearance, en epoch ms, o None si no se sabe.
+
+        Es el dato que le faltaba al lado Node para dejar de renovar cada 9
+        minutos adivinados: el vencimiento lo pone Cloudflare en la cookie (lo
+        que dure el "Challenge Passage" de la zona), así que la renovación se
+        puede agendar contra eso en vez de contra una constante. Playwright lo
+        devuelve en segundos, y -1 cuando la cookie es de sesión (sin
+        vencimiento propio); eso último viaja como None y del otro lado cae al
+        intervalo fijo de siempre.
+        """
+        cookie = self._clearance_cookie()
+        if not cookie:
+            return None
+        expires = cookie.get("expires")
+        if not isinstance(expires, (int, float)) or expires <= 0:
+            return None
+        return int(expires * 1000)
+
+    @staticmethod
+    def _vencimiento_log(expira_ms: int | None) -> str:
+        """Cuánto le queda a la clearance, para el log."""
+        if expira_ms is None:
+            return " (clearance sin vencimiento propio)"
+        faltan_min = (expira_ms / 1000 - time.time()) / 60
+        return f" (clearance vence en {faltan_min:.1f} min)"
 
     def _renovar_en_caliente(self, exigir_nueva: bool = False) -> dict | None:
         """
@@ -272,6 +306,13 @@ class Bridge:
             # realmente venza va a haber challenge y se resuelve acá mismo, en
             # esta misma sesión -- pero conviene que el log no diga "renovado"
             # cuando no pasó nada.
+            #
+            # Y no es sólo cosmético: revalidar tampoco corre el `expires`, así
+            # que una renovación que cae en esta rama no compró un solo segundo
+            # de vigencia. Por eso el vencimiento ahora viaja al lado Node y la
+            # próxima renovación se agenda contra él (`clearanceExpiresAt` y
+            # `proximaRenovacionMs` en mgpBridge.ts): renovar antes de que la
+            # clearance esté por vencer es pagar el hueco al pedo.
             if clearance != clearance_previa:
                 log("Clearance nueva")
             elif exigir_nueva:
@@ -293,8 +334,17 @@ class Bridge:
             php_sess_id = next(
                 (c["value"] for c in resp.cookies if c["name"] == "PHPSESSID"), None
             )
-            log(f"PHPSESSID: {php_sess_id} (renovado en caliente)")
-            return {"ok": True, "phpSessId": php_sess_id, "hotRenew": True}
+            expira_ms = self._clearance_expira_ms()
+            log(
+                f"PHPSESSID: {php_sess_id} (renovado en caliente)"
+                f"{self._vencimiento_log(expira_ms)}"
+            )
+            return {
+                "ok": True,
+                "phpSessId": php_sess_id,
+                "hotRenew": True,
+                "clearanceExpiresAt": expira_ms,
+            }
         except Exception as e:
             log(f"Renovación en caliente falló ({e}), rehago la sesión")
             return None

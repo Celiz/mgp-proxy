@@ -35,15 +35,49 @@ const INIT_TIMEOUT_MS = Number(process.env.MGP_CHALLENGE_TIMEOUT_MS ?? 90_000);
 /** Cuánto esperar antes de relanzar el subproceso si murió. */
 const RESPAWN_DELAY_MS = 2_000;
 /**
- * Renovación proactiva en segundo plano, antes de que Cloudflare la dé por
- * vencida. El approach viejo midió ~12-15 min de vigencia real; 9 min deja
- * margen. bridge.py cierra la sesión vieja antes de abrir la nueva (la API
- * sync de Playwright no tolera dos sesiones abiertas a la vez en el mismo
- * proceso), así que hay un hueco de ~10s sin servir durante la renovación.
- * Las requests que lleguen en ese hueco quedan en la cola del bridge (ver
- * `enqueue`) esperando su turno, no se pierden ni fallan.
+ * Cada cuánto renovar cuando NO sabemos cuándo vence la clearance.
+ *
+ * Es el fallback: lo normal es que bridge.py reporte el `expires` real de la
+ * cookie cf_clearance y que la renovación se agende contra eso (ver
+ * `proximaRenovacionMs`). Renovar cada 9 minutos fijos salía caro y casi
+ * siempre al pedo: si Cloudflare no challengea, el re-fetch de la entrada
+ * devuelve la MISMA cookie con el MISMO vencimiento -- se revalida, no se
+ * renueva -- así que se pagaba el hueco sin comprar un segundo de vigencia. El
+ * log de bridge.py lo venía diciendo desde 6261934: "Clearance sin cambios (CF
+ * no challengeó, sigue válida)".
+ *
+ * El hueco sigue existiendo: bridge.py cierra la sesión vieja antes de abrir la
+ * nueva (la API sync de Playwright no tolera dos sesiones abiertas a la vez en
+ * el mismo proceso) y su loop de stdin no lee nada mientras tanto. Lo que
+ * cambia es cuántas veces por hora se paga.
  */
 const RENEW_INTERVAL_MS = Number(process.env.MGP_BRIDGE_RENEW_MS ?? 9 * 60_000);
+/**
+ * Cuánto antes del vencimiento se dispara la renovación.
+ *
+ * Corto a propósito: Cloudflare entrega una clearance nueva sólo cuando
+ * challengea, y no challengea mientras la vieja siga válida. Pedirla con
+ * mucha anticipación garantiza un "Clearance sin cambios" -- una renovación
+ * que cuesta el hueco y no renueva nada. 30s alcanzan para que un init
+ * completo (~20s en el A22) termine antes de que la cookie muera.
+ */
+const RENEW_MARGIN_MS = Number(process.env.MGP_BRIDGE_RENEW_MARGIN_MS ?? 30_000);
+/**
+ * Cuánto DESPUÉS del vencimiento se reintenta cuando el intento anterior sólo
+ * revalidó. Pasado el vencimiento el challenge está garantizado, así que este
+ * es el momento en que renovar sirve seguro (ver `proximaRenovacionMs`).
+ */
+const RENEW_GRACE_MS = 5_000;
+/**
+ * Piso y techo de la renovación agendada por vencimiento. El piso evita el loop
+ * si la cookie viene ya vencida (o con un vencimiento raro) y Cloudflare igual
+ * no challengea: en ese caso quien arregla es el camino reactivo, que tiene su
+ * propio cooldown. El techo evita quedarnos horas sin tocar la sesión si un día
+ * nos dan una clearance largísima -- el navegador y el PHPSESSID también se
+ * ponen viejos.
+ */
+const RENEW_MIN_MS = Number(process.env.MGP_BRIDGE_RENEW_MIN_MS ?? 60_000);
+const RENEW_MAX_MS = Number(process.env.MGP_BRIDGE_RENEW_MAX_MS ?? 30 * 60_000);
 /** Cada cuánto reintenta la renovación si la cola está ocupada (ver `attemptRenew`). */
 const RENEW_IDLE_RETRY_MS = 5_000;
 /** Techo de espera por "no hay hueco libre": pasado esto, renueva igual. */
@@ -63,9 +97,10 @@ const MAX_QUEUE_DEPTH = Number(process.env.MGP_BRIDGE_MAX_QUEUE ?? 6);
  * Estas no pasan por `enqueue()`: el mutex existe porque bridge.py atendía un
  * comando por vez, y eso ya no es cierto para el atajo por curl_cffi, que
  * corre en un pool de hilos y no toca el navegador. Mantener el mutex acá
- * significaba serializar requests que no lo necesitan -- y peor, dejarlas
- * afuera durante los ~10s de cada renovación, que es de donde salían los
- * 43.874 `bridge_initializing: renovando la sesión`.
+ * significaba serializar requests que no lo necesitan.
+ *
+ * Ojo: eso vale MIENTRAS no haya un init en vuelo. Durante uno, el loop de
+ * stdin de bridge.py no lee nada y el atajo tampoco entra (ver `initEnVuelo`).
  *
  * Tiene que acompañar a `MGP_BRIDGE_FAST_WORKERS` del lado Python (mismo
  * default, 4): si Node deja entrar más de las que el pool puede atender, las de
@@ -145,6 +180,14 @@ let initPromise: Promise<void> | null = null;
 let restarts = -1;
 let lastError: string | null = null;
 let lastInitAt: number | null = null;
+/**
+ * Cuándo vence la clearance según Cloudflare (epoch ms), o null si el bridge no
+ * la pudo leer. Viaja en la respuesta de cada init/renovación y es lo que decide
+ * cuándo se agenda la próxima (ver `proximaRenovacionMs`).
+ */
+let clearanceExpiresAt: number | null = null;
+/** Cuándo se va a disparar la próxima renovación proactiva. Para /stats/data. */
+let nextRenewAt: number | null = null;
 let renewTimer: ReturnType<typeof setTimeout> | null = null;
 /** Hay una renovación proactiva ocupando el mutex del bridge (ver `attemptRenew`). */
 let renewing = false;
@@ -290,9 +333,52 @@ function enqueue<T extends BridgeReply>(fn: () => Promise<T>, opts?: { bypassCap
 // Init y renovación
 // ---------------------------------------------------------------------------
 
+/**
+ * Cuánto falta para la próxima renovación.
+ *
+ * Contra el vencimiento real de la clearance, no contra un intervalo fijo: es
+ * el único momento en que renovar sirve de algo, porque recién ahí Cloudflare
+ * challengea y entrega una cookie nueva. Antes de eso el re-fetch de la entrada
+ * devuelve la misma, con el mismo `expires`, y el hueco se paga igual.
+ *
+ * Dos momentos, en este orden:
+ *
+ * 1. `RENEW_MARGIN_MS` antes del vencimiento, que es el intento "limpio": si
+ *    Cloudflare ya challengea ahí, la clearance se renueva sin que llegue a
+ *    haber un solo segundo de cookie vencida.
+ * 2. Si ese momento ya pasó -- típicamente porque el intento anterior sólo
+ *    revalidó y volvió con el MISMO `expires` -- el próximo va apenas después
+ *    del vencimiento, donde el challenge sí está garantizado.
+ *
+ * Sin el paso 2 el piso mandaba al reintento a un minuto redondo que caía
+ * bastante después del vencimiento, y en ese hueco webWS.php contesta 403: se
+ * terminaba renovando por el camino reactivo, que es justo el que queremos
+ * evitar.
+ */
+function proximaRenovacionMs(): number {
+    if (clearanceExpiresAt === null) return RENEW_INTERVAL_MS;
+    const ahora = Date.now();
+    const antesDeVencer = clearanceExpiresAt - RENEW_MARGIN_MS - ahora;
+    const apenasVencida = clearanceExpiresAt + RENEW_GRACE_MS - ahora;
+    const falta = antesDeVencer > RENEW_MIN_MS ? antesDeVencer : apenasVencida;
+    return Math.min(Math.max(falta, RENEW_MIN_MS), RENEW_MAX_MS);
+}
+
+/** Guarda el vencimiento que reportó bridge.py, si lo reportó. */
+function registrarClearance(r: BridgeReply): void {
+    clearanceExpiresAt = typeof r.clearanceExpiresAt === "number" ? r.clearanceExpiresAt : null;
+}
+
 function scheduleRenew(): void {
     if (renewTimer) clearTimeout(renewTimer);
-    renewTimer = setTimeout(() => attemptRenew(Date.now()), RENEW_INTERVAL_MS);
+    const enMs = proximaRenovacionMs();
+    nextRenewAt = Date.now() + enMs;
+    const detalle =
+        clearanceExpiresAt === null
+            ? "sin vencimiento conocido, intervalo fijo"
+            : `clearance vence en ${Math.round((clearanceExpiresAt - Date.now()) / 1000)}s`;
+    log(`próxima renovación en ${Math.round(enMs / 1000)}s (${detalle})`);
+    renewTimer = setTimeout(() => attemptRenew(Date.now()), enMs);
     renewTimer.unref?.();
 }
 
@@ -304,7 +390,12 @@ function scheduleRenew(): void {
  * para siempre bajo carga sostenida.
  */
 function attemptRenew(dueSince: number): void {
-    if (queueDepth > 0 && Date.now() - dueSince < RENEW_MAX_DEFER_MS) {
+    // La cola sólo posterga mientras la clearance siga sirviendo. Si ya venció,
+    // lo que hay en cola está fallando justamente por eso: postergar la
+    // renovación es postergar el arreglo, y encima el que termina renovando es
+    // el camino reactivo (que además fuerza sesión nueva).
+    const vencida = clearanceExpiresAt !== null && Date.now() >= clearanceExpiresAt;
+    if (!vencida && queueDepth > 0 && Date.now() - dueSince < RENEW_MAX_DEFER_MS) {
         renewTimer = setTimeout(() => attemptRenew(dueSince), RENEW_IDLE_RETRY_MS);
         renewTimer.unref?.();
         return;
@@ -319,9 +410,10 @@ function attemptRenew(dueSince: number): void {
     enqueue(() => send({ cmd: "init" }, INIT_TIMEOUT_MS), { bypassCap: true })
         .then((r) => {
             if (r.error) throw new Error(r.error);
+            registrarClearance(r);
             lastError = null;
             lastInitAt = Date.now();
-            log("renovación OK");
+            log(`renovación OK${r.hotRenew ? " (en caliente)" : ""}`);
         })
         .catch((e) => {
             // No forzamos `ready = false` acá: si bridge.py se quedó sin
@@ -358,6 +450,7 @@ function ensureInit(): Promise<void> {
             if (r.error) throw new Error(r.error);
             ready = true;
             everReady = true;
+            registrarClearance(r);
             lastError = null;
             lastInitAt = Date.now();
             log(`listo (phpSessId=${r.phpSessId ?? "?"}${r.hotRenew ? ", en caliente" : ""})`);
@@ -467,19 +560,40 @@ function interpretarRespuesta(result: BridgeReply): unknown {
     }
 }
 
+/**
+ * ¿Hay un init ocupando el hilo principal de bridge.py?
+ *
+ * `renewing` es la renovación proactiva; `initPromise`, el init reactivo (el que
+ * dispara un challenge) y el arranque en frío. Los dos bloquean igual el loop de
+ * stdin del lado Python, y el reactivo es el peor: un init completo mide ~20s,
+ * más que el timeout de cualquier request que se mande mientras tanto.
+ */
+function initEnVuelo(): boolean {
+    return renewing || initPromise !== null;
+}
+
 export async function fetchMgpBridge(body: string): Promise<unknown> {
-    // Camino rápido: sin mutex y sin esperar a que termine una renovación.
+    // Camino rápido: sin mutex.
     //
     // `enqueue()` existe porque bridge.py atendía un comando por vez. Para el
     // atajo por curl_cffi eso ya no es cierto -- corre en un pool de hilos y no
     // toca el navegador -- así que pasarlo por el mutex serializaba requests que
-    // no lo necesitan, y las dejaba afuera durante los ~10s de cada renovación.
-    // De ahí salían los 43.874 `bridge_initializing: renovando la sesión`.
+    // no lo necesitan.
     //
-    // Ojo con el orden: esto va ANTES del guard de abajo a propósito. La sesión
-    // que se está renovando es la del navegador; la clearance que usa el atajo
-    // sigue viva (bridge.py no la limpia en `close()`, justamente por esto).
-    if (fastReady && fastInflight < FAST_MAX_INFLIGHT) {
+    // Pero sí espera a que no haya un init en vuelo, aunque el atajo no toque el
+    // navegador. El motivo está del lado Python: `main()` lee stdin en serie y
+    // atiende el `init` ahí mismo, en el hilo principal, así que mientras dura
+    // la renovación no lee NINGUNA línea. Un `fetch` mandado en esa ventana no
+    // se atiende: queda dormido en el pipe, y como el timeout de `send()`
+    // arranca al escribir, si la renovación pasa los 15s de `FETCH_TIMEOUT_MS`
+    // vuelve como `bridge_timeout` -- que sí cuenta para el breaker
+    // (mgpQueue.ts), a diferencia de `bridge_initializing`. Mandarlas igual era
+    // cambiar un rechazo gratis por un timeout de 15s que abre el circuito una
+    // vez por renovación.
+    //
+    // Mientras no haya init en vuelo el atajo sigue corriendo en paralelo al
+    // navegador, que era el punto de bca685e.
+    if (fastReady && !initEnVuelo() && fastInflight < FAST_MAX_INFLIGHT) {
         fastInflight++;
         try {
             const rapida = await send({ cmd: "fetch", body }, FETCH_TIMEOUT_MS);
@@ -527,6 +641,8 @@ export function getBridgeStatus(): {
     initializing: boolean;
     restarts: number;
     lastInitAt: string | null;
+    clearanceExpiresAt: string | null;
+    nextRenewAt: string | null;
     lastError: string | null;
     queueDepth: number;
     maxQueueDepth: number;
@@ -541,6 +657,10 @@ export function getBridgeStatus(): {
         initializing: Boolean(initPromise),
         restarts: Math.max(restarts, 0),
         lastInitAt: lastInitAt ? new Date(lastInitAt).toISOString() : null,
+        // Sin esto no hay forma de ver desde afuera si la renovación está
+        // siguiendo al vencimiento real o si cayó al intervalo fijo.
+        clearanceExpiresAt: clearanceExpiresAt ? new Date(clearanceExpiresAt).toISOString() : null,
+        nextRenewAt: nextRenewAt ? new Date(nextRenewAt).toISOString() : null,
         lastError,
         queueDepth,
         maxQueueDepth: MAX_QUEUE_DEPTH,
