@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: mgp-proxy-v670
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.v670
+    healthCheckPath: /health
+    envVars:
+      - key: MGP_TRANSPORT
+        value: v670
