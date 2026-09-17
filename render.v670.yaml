@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: mgp-proxy
+    name: mgp-proxy-v670
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile.v670
